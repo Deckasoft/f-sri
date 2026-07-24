@@ -144,8 +144,14 @@ jest.mock('../src/models/IssuingCompany', () => {
     static get find() {
       return issuingCompanyStaticMocks.find;
     }
-    static get findOne() {
-      return issuingCompanyStaticMocks.findOne;
+    // Mimics a Mongoose Query: awaitable directly and chainable via .select()
+    // (buscarIssuingCompany does IssuingCompany.findOne(...).select(...) to
+    // pull in the select:false certificate fields).
+    static findOne(...args: any[]) {
+      const resultPromise = Promise.resolve(issuingCompanyStaticMocks.findOne(...args));
+      const query: any = resultPromise;
+      query.select = () => resultPromise;
+      return query;
     }
     static get findById() {
       return issuingCompanyStaticMocks.findById;
@@ -310,7 +316,9 @@ const invoiceDetail = {
 };
 
 process.env.JWT_SECRET = 'secret';
-process.env.ENCRYPTION_KEY = 'test_encryption_key_32_bytes_long!!';
+// Must stay a valid 64 hex char key: createApp() now validates ENCRYPTION_KEY
+// via loadEnv() (see src/config/env.config.ts) before wiring the app.
+process.env.ENCRYPTION_KEY = 'a'.repeat(64);
 const token = jwt.sign({ userId: '1' }, process.env.JWT_SECRET);
 const authHeader = `Bearer ${token}`;
 const app = createApp();

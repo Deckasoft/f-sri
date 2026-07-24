@@ -2,10 +2,19 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+import { loadEnv } from './config/env.config';
+
+// Fail fast: validate required environment variables before anything else
+// (including modules imported below that read process.env eagerly, such as
+// encryption.utils.ts) has a chance to run with missing/invalid config.
+loadEnv();
+
 import express from 'express';
 import mongoose from 'mongoose';
 import cors from 'cors';
+import helmet from 'helmet';
 import { getCorsConfig } from './config/cors.config';
+import { generalLimiter } from './config/rateLimit.config';
 import swaggerSpec from './swagger';
 import authRoutes from './routes/auth';
 import corsTestRoutes from './routes/cors-test';
@@ -25,21 +34,22 @@ import corsErrorHandler from './middleware/corsErrorHandler';
 
 const app = express();
 
+// Cabeceras de seguridad HTTP (helmet). CSP se desactiva porque /docs sirve
+// Swagger UI desde un CDN externo (unpkg.com); el CSP por defecto de helmet
+// (default-src 'self') bloquearía esos scripts en el navegador.
+app.use(helmet({ contentSecurityPolicy: false }));
+
 // Configurar CORS
 const corsConfig = getCorsConfig();
 app.use(cors(corsConfig));
 
 // Middleware adicional para headers de CORS
 app.use((req, res, next) => {
-  // Logs para debugging
-  console.log(`📡 ${req.method} ${req.path} - Origin: ${req.get('Origin') || 'No origin'}`);
-
   // Headers adicionales de seguridad
   res.header('Access-Control-Allow-Credentials', 'true');
 
   // Para peticiones OPTIONS (preflight)
   if (req.method === 'OPTIONS') {
-    console.log('✅ Preflight request handled');
     res.status(200).end();
     return;
   }
@@ -90,6 +100,9 @@ app.get('/health', (_req, res) => {
   });
 });
 
+// General rate limiter for all API routes
+app.use('/api/v1', generalLimiter);
+
 // Authentication middleware for protected routes
 app.use(verifyToken);
 app.use('/api/v1/identification-type', identificationTypeRoutes);
@@ -117,9 +130,10 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 });
 
 const PORT = process.env.PORT || 3000;
+const { MONGO_URI } = loadEnv();
 
 mongoose
-  .connect(process.env.MONGO_URI || '')
+  .connect(MONGO_URI)
   .then(() => {
     app.listen(PORT, () => {
       console.log(`🚀 Server running on port ${PORT}`);

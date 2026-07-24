@@ -1,4 +1,7 @@
 import express from 'express';
+import helmet from 'helmet';
+import { loadEnv } from './config/env.config';
+import { generalLimiter } from './config/rateLimit.config';
 import authRoutes from './routes/auth';
 import identificationTypeRoutes from './routes/identificationType';
 import issuingCompanyRoutes from './routes/issuingCompany';
@@ -13,10 +16,16 @@ import invoiceDetailRoutes from './routes/invoiceDetail';
 import invoicePDFRoutes from './routes/invoicePDF';
 import verifyToken from './middleware/verifyToken';
 
-export function createApp() {
+export const createApp = () => {
+  // Mirrors index.ts: fail fast on missing/invalid env vars before wiring the app.
+  loadEnv();
+
   const app = express();
+  // Mirrors index.ts's helmet config (CSP off — see index.ts for why).
+  app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.json());
   app.use(authRoutes);
+  app.use('/api/v1', generalLimiter);
   app.use(verifyToken);
   app.use('/api/v1/identification-type', identificationTypeRoutes);
   app.use('/api/v1/issuing-company', issuingCompanyRoutes);
@@ -30,4 +39,4 @@ export function createApp() {
   app.use('/api/v1/invoice-detail', invoiceDetailRoutes);
   app.use('/api/v1/invoice-pdf', invoicePDFRoutes);
   return app;
-}
+};
