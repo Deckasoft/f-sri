@@ -1,5 +1,3 @@
-import fs from 'fs';
-
 const firmarXMLMock = jest.fn().mockResolvedValue('<notaDebito>firmada</notaDebito>');
 jest.mock('../../src/utils/firma.utils', () => ({
   firmarXML: (...args: any[]) => firmarXMLMock(...args),
@@ -28,11 +26,20 @@ const invoiceServiceMocks = {
   buscarTipoIdentificacion: jest.fn(),
   buscarIssuingCompany: jest.fn(),
   buscarClient: jest.fn(),
-  diagnoseP12Certificate: jest.fn(),
-  verifyP12Password: jest.fn(),
-  findWorkingP12Password: jest.fn(),
 };
 jest.mock('../../src/services/invoice.service', () => ({ InvoiceService: invoiceServiceMocks }));
+
+const withCompanyP12Mock = jest.fn(async (company: any, fn: (p: string, pw: string) => Promise<any>) => {
+  if (!company.certificate || !company.certificate_password) {
+    throw new Error('La empresa no tiene certificado digital configurado');
+  }
+  return fn('/tmp/cert.p12', 'test-cert-password');
+});
+const verifyP12PasswordMock = jest.fn().mockResolvedValue({ valid: true });
+jest.mock('../../src/utils/certificate.utils', () => ({
+  withCompanyP12: (...args: any[]) => (withCompanyP12Mock as any)(...args),
+  verifyP12Password: (...args: any[]) => (verifyP12PasswordMock as any)(...args),
+}));
 
 const debitNoteStatics = { findOne: jest.fn(), findById: jest.fn() };
 const savedDebitNotes: any[] = [];
@@ -90,8 +97,8 @@ const empresaMock: any = {
   direccion_matriz: 'Av. Principal',
   direccion_establecimiento: 'Av. Principal',
   obligado_contabilidad: true,
-  certificatePath: '/tmp/cert.p12',
-  certificatePassword: 'test-cert-password',
+  certificate: 'encrypted-cert-base64',
+  certificate_password: 'encrypted-cert-password',
 };
 
 const clienteMock: any = { _id: 'cliente-1', razon_social: 'CLIENTE', identificacion: '0106079783' };
@@ -183,7 +190,8 @@ describe('DebitNoteService', () => {
 
   describe('crearNotaDebitoCompleta', () => {
     it('creates the debit note with an 05 access key, totals and motivos', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
+      // Skip the real signing flow in the fire-and-forget background call.
+      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
       const resultado = await DebitNoteService.crearNotaDebitoCompleta(requestValido);
 
@@ -207,12 +215,11 @@ describe('DebitNoteService', () => {
     });
 
     it('marks ERROR_FIRMA when there is no certificate', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
       const nota: any = doc();
 
       await DebitNoteService.procesarEnvioSRI(
         nota,
-        { ...empresaMock, certificatePath: undefined },
+        { ...empresaMock, certificate: undefined },
         clienteMock,
         requestValido,
       );
@@ -221,21 +228,14 @@ describe('DebitNoteService', () => {
     });
 
     it('signs with tipoDocumento 05 and completes the RECIBIDA flow', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const programarSpy = jest.spyOn(DebitNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const nota: any = doc();
 
       await DebitNoteService.procesarEnvioSRI(nota, empresaMock, clienteMock, requestValido);
 
-      expect(firmarXMLMock).toHaveBeenCalledWith(
-        '<notaDebito/>',
-        empresaMock.certificatePath,
-        'test-cert-password',
-        '05',
-      );
+      expect(firmarXMLMock).toHaveBeenCalledWith('<notaDebito/>', '/tmp/cert.p12', 'test-cert-password', '05');
       expect(nota.sri_estado).toBe('RECIBIDA');
       expect(generateDebitNotePDFMock).toHaveBeenCalled();
       expect(savedPDFs[0].estado).toBe('GENERADO');
@@ -243,8 +243,7 @@ describe('DebitNoteService', () => {
     });
 
     it('records signing errors as ERROR_FIRMA', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: false, error: 'corrupt' });
+      verifyP12PasswordMock.mockResolvedValue({ valid: false, error: 'corrupt' });
       const nota: any = doc();
 
       await DebitNoteService.procesarEnvioSRI(nota, empresaMock, clienteMock, requestValido);

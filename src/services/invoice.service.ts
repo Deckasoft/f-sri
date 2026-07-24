@@ -5,6 +5,7 @@ import { firmarXML } from '../utils/firma.utils';
 import { enviarComprobanteSRI, autorizarComprobanteSRI, RespuestaSRI, AutorizacionSRI } from '../utils/sri.utils';
 import { generateInvoicePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import Invoice from '../models/Invoice';
 import InvoiceDetail from '../models/InvoiceDetail';
 import InvoicePDF from '../models/InvoicePDF';
@@ -13,14 +14,9 @@ import IssuingCompany, { IIssuingCompany } from '../models/IssuingCompany';
 import Client, { IClient } from '../models/Client';
 import Product, { IProduct } from '../models/Product';
 import fs from 'fs';
-import { decrypt } from '../utils/encryption.utils';
 import path from 'path';
 import os from 'os';
 import forge from 'node-forge';
-import { exec } from 'child_process';
-import { promisify } from 'util';
-
-const execPromise = promisify(exec);
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con facturas
@@ -63,77 +59,18 @@ export class InvoiceService {
   }
 
   /**
-   * Busca una empresa emisora por su RUC
+   * Busca una empresa emisora por su RUC.
+   *
+   * El certificado y su contraseña (cifrados en reposo) están marcados como
+   * `select: false` en el esquema, así que se incluyen explícitamente aquí:
+   * este es el único punto de lectura compartido por el flujo de firma y
+   * envío al SRI de las 5 entidades emitidas por el sistema. A diferencia del
+   * comportamiento anterior, esta función ya NO materializa el certificado en
+   * un archivo temporal: eso ocurre únicamente dentro de procesarEnvioSRI,
+   * justo antes de firmar, a través de withCompanyP12.
    */
-  static async buscarIssuingCompany(
-    ruc: string,
-  ): Promise<(IIssuingCompany & { certificatePath?: string; certificatePassword?: string }) | null> {
-    const empresa = await IssuingCompany.findOne({ ruc });
-    if (!empresa) return null;
-
-    let certificatePath: string | undefined;
-    let certificatePassword: string | undefined;
-
-    if (empresa.certificate && empresa.certificate_password) {
-      try {
-        if (!empresa.certificate.trim()) {
-          throw new Error('El certificado está vacío');
-        }
-
-        try {
-          const certBuffer = Buffer.from(empresa.certificate, 'base64');
-          const tempDir = os.tmpdir();
-          const p12Path = path.join(tempDir, `cert-${Date.now()}.p12`);
-
-          if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir, { recursive: true });
-          }
-
-          fs.writeFileSync(p12Path, certBuffer);
-
-          try {
-            if (empresa.certificate_password && empresa.certificate_password.includes(':')) {
-              try {
-                certificatePassword = decrypt(empresa.certificate_password);
-              } catch (decryptError: any) {
-                certificatePassword = empresa.certificate_password;
-              }
-            } else {
-              certificatePassword = empresa.certificate_password;
-            }
-
-            if (!certificatePassword || certificatePassword.trim() === '') {
-              certificatePassword = '';
-            }
-          } catch (passError) {
-            certificatePassword = empresa.certificate_password || '';
-          }
-
-          certificatePath = p12Path;
-
-          if (!certificatePath || !fs.existsSync(certificatePath) || fs.statSync(certificatePath).size === 0) {
-            throw new Error('El archivo del certificado no existe o está vacío');
-          }
-        } catch (error) {
-          throw new Error(
-            'Error al procesar el certificado PKCS#12: ' +
-              (error instanceof Error ? error.message : 'Error desconocido'),
-          );
-        }
-
-        if (!certificatePath) {
-          throw new Error('No se pudo generar el archivo del certificado');
-        }
-      } catch (error) {
-        throw new Error('Error al procesar el certificado: ' + (error as Error).message);
-      }
-    }
-
-    return {
-      ...(empresa.toObject() as any),
-      certificatePath,
-      certificatePassword,
-    } as any;
+  static async buscarIssuingCompany(ruc: string): Promise<IIssuingCompany | null> {
+    return IssuingCompany.findOne({ ruc }).select('+certificate +certificate_password');
   }
 
   /**
@@ -332,79 +269,57 @@ export class InvoiceService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
+      if (!empresa.certificate || !empresa.certificate_password) {
+        factura.sri_estado = 'ERROR_FIRMA';
+        factura.sri_mensajes = { mensaje: 'Certificate not found for signing' };
+        await factura.save();
+        return;
+      }
 
-      if (p12Path && fs.existsSync(p12Path)) {
-        try {
-          const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-
-          if (!diagnosis.fileExists) {
-            throw new Error('El archivo del certificado P12 no existe');
-          }
-
-          if (diagnosis.fileSize === 0) {
-            throw new Error('El archivo del certificado P12 está vacío');
-          }
-
-          if (!diagnosis.isValidP12) {
-            throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-          }
-
-          const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-
-          let workingPassword = p12Password;
-
+      try {
+        // withCompanyP12 materializes the (encrypted-at-rest) P12 into a
+        // short-lived temp file for the duration of this callback only, and
+        // guarantees it is deleted afterwards, success or failure.
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
           if (!passwordVerification.valid) {
-            const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-
-            if (passwordSearch.password !== null) {
-              workingPassword = passwordSearch.password;
-            } else {
-              throw new Error(
-                `Error de contraseña del certificado P12: ${passwordVerification.error}. Se probaron múltiples contraseñas sin éxito. Verifique que la contraseña del certificado sea correcta.`,
-              );
-            }
+            throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
 
           // Sign directly from the P12 using the SRI-compliant XAdES-BES signer
-          const xmlFirmado = await firmarXML(factura.xml, p12Path, workingPassword, '01');
+          return firmarXML(factura.xml, p12Path, p12Password, '01');
+        });
 
-          factura.xml_firmado = xmlFirmado;
+        factura.xml_firmado = xmlFirmado;
+        await factura.save();
+
+        if (factura.xml_firmado) {
+          factura.sri_fecha_envio = new Date();
           await factura.save();
 
-          if (factura.xml_firmado) {
-            factura.sri_fecha_envio = new Date();
-            await factura.save();
+          respuestaSRI = await enviarComprobanteSRI(factura.xml_firmado);
 
-            respuestaSRI = await enviarComprobanteSRI(factura.xml_firmado);
-
-            factura.sri_fecha_respuesta = new Date();
-            factura.sri_estado = respuestaSRI.estado;
-            if (respuestaSRI.mensajes) {
-              factura.sri_mensajes = respuestaSRI.mensajes;
-            }
-            await factura.save();
-
-            if (respuestaSRI.estado === 'RECIBIDA') {
-              console.log(
-                `✅ FACTURA RECIBIDA POR SRI - ID: ${factura._id}, Clave: ${factura.clave_acceso}, Secuencial: ${factura.secuencial}`,
-              );
-              await this.generarPDFFactura(factura, empresa, cliente, productos, datosFactura);
-              this.programarConsultaAutorizacion(String(factura._id));
-            } else {
-              console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Factura ID: ${factura._id}`);
-            }
+          factura.sri_fecha_respuesta = new Date();
+          factura.sri_estado = respuestaSRI.estado;
+          if (respuestaSRI.mensajes) {
+            factura.sri_mensajes = respuestaSRI.mensajes;
           }
-        } catch (error: any) {
-          console.error('Error during certificate conversion or signing:', error.message);
-          factura.sri_estado = 'ERROR_FIRMA';
-          factura.sri_mensajes = { error: error.message };
           await factura.save();
+
+          if (respuestaSRI.estado === 'RECIBIDA') {
+            console.log(
+              `✅ FACTURA RECIBIDA POR SRI - ID: ${factura._id}, Clave: ${factura.clave_acceso}, Secuencial: ${factura.secuencial}`,
+            );
+            await this.generarPDFFactura(factura, empresa, cliente, productos, datosFactura);
+            this.programarConsultaAutorizacion(String(factura._id));
+          } else {
+            console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Factura ID: ${factura._id}`);
+          }
         }
-      } else {
+      } catch (error: any) {
+        console.error('Error during certificate conversion or signing:', error.message);
         factura.sri_estado = 'ERROR_FIRMA';
-        factura.sri_mensajes = { mensaje: 'Certificate not found for signing' };
+        factura.sri_mensajes = { error: error.message };
         await factura.save();
       }
     } catch (error: any) {
@@ -412,30 +327,6 @@ export class InvoiceService {
       factura.sri_estado = 'ERROR_PROCESO';
       factura.sri_mensajes = { error: error.message };
       await factura.save();
-    }
-  }
-
-  /**
-   * Verifica si la contraseña del certificado P12 es correcta
-   * @param p12Path Ruta al archivo P12
-   * @param password Contraseña a verificar
-   * @returns Promise<boolean> true si la contraseña es correcta
-   */
-  static async verifyP12Password(p12Path: string, password: string): Promise<{ valid: boolean; error?: string }> {
-    try {
-      const p12Buffer = fs.readFileSync(p12Path);
-      const p12Base64 = p12Buffer.toString('base64');
-      const p12Der = forge.util.decode64(p12Base64);
-      const p12Asn1 = forge.asn1.fromDer(p12Der);
-
-      try {
-        const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
-        return { valid: true };
-      } catch (error: any) {
-        return { valid: false, error: error.message };
-      }
-    } catch (error: any) {
-      return { valid: false, error: error.message };
     }
   }
 
@@ -686,120 +577,6 @@ export class InvoiceService {
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);
       return null;
-    }
-  }
-
-  /**
-   * Intenta diferentes contraseñas comunes para el certificado P12
-   * @param p12Path Ruta al archivo P12
-   * @param originalPassword Contraseña original a probar primero
-   * @returns Promise con la contraseña correcta o null si ninguna funciona
-   */
-  static async findWorkingP12Password(
-    p12Path: string,
-    originalPassword: string,
-  ): Promise<{ password: string | null; error?: string }> {
-    const passwordsToTry = [
-      originalPassword,
-      '',
-      'password',
-      '123456',
-      'admin',
-      originalPassword?.toLowerCase(),
-      originalPassword?.toUpperCase(),
-    ].filter((pass, index, arr) => pass !== undefined && arr.indexOf(pass) === index);
-
-    for (const password of passwordsToTry) {
-      const verification = await this.verifyP12Password(p12Path, password);
-      if (verification.valid) {
-        return { password };
-      }
-    }
-
-    return { password: null, error: 'No se encontró una contraseña válida para el certificado P12' };
-  }
-
-  /**
-   * Función de diagnóstico para certificados P12
-   * @param p12Path Ruta al archivo P12
-   * @param password Contraseña del certificado
-   * @returns Información de diagnóstico del certificado
-   */
-  static async diagnoseP12Certificate(
-    p12Path: string,
-    password: string,
-  ): Promise<{
-    fileExists: boolean;
-    fileSize: number;
-    isValidP12: boolean;
-    passwordWorks: boolean;
-    certificateInfo?: any;
-    error?: string;
-  }> {
-    const diagnosis: {
-      fileExists: boolean;
-      fileSize: number;
-      isValidP12: boolean;
-      passwordWorks: boolean;
-      certificateInfo?: any;
-      error?: string;
-    } = {
-      fileExists: false,
-      fileSize: 0,
-      isValidP12: false,
-      passwordWorks: false,
-    };
-
-    try {
-      diagnosis.fileExists = fs.existsSync(p12Path);
-      if (!diagnosis.fileExists) {
-        return { ...diagnosis, error: 'El archivo P12 no existe' };
-      }
-
-      const stats = fs.statSync(p12Path);
-      diagnosis.fileSize = stats.size;
-      if (diagnosis.fileSize === 0) {
-        return { ...diagnosis, error: 'El archivo P12 está vacío' };
-      }
-
-      try {
-        const p12Buffer = fs.readFileSync(p12Path);
-        const p12Base64 = p12Buffer.toString('base64');
-        const p12Der = forge.util.decode64(p12Base64);
-        const p12Asn1 = forge.asn1.fromDer(p12Der);
-        diagnosis.isValidP12 = true;
-
-        try {
-          const p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
-          diagnosis.passwordWorks = true;
-
-          const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
-          const certBags = bags[forge.pki.oids.certBag] || [];
-
-          if (certBags.length > 0) {
-            const cert = certBags[0].cert;
-            if (cert) {
-              diagnosis.certificateInfo = {
-                subject: cert.subject.attributes.map((attr: any) => `${attr.shortName}=${attr.value}`).join(', '),
-                issuer: cert.issuer.attributes.map((attr: any) => `${attr.shortName}=${attr.value}`).join(', '),
-                validFrom: cert.validity.notBefore,
-                validTo: cert.validity.notAfter,
-                serialNumber: cert.serialNumber,
-              };
-            }
-          }
-        } catch (passwordError: any) {
-          diagnosis.passwordWorks = false;
-          return { ...diagnosis, error: `Error de contraseña: ${passwordError.message}` };
-        }
-      } catch (parseError: any) {
-        diagnosis.isValidP12 = false;
-        return { ...diagnosis, error: `Error al parsear P12: ${parseError.message}` };
-      }
-
-      return diagnosis;
-    } catch (error: any) {
-      return { ...diagnosis, error: `Error general: ${error.message}` };
     }
   }
 }

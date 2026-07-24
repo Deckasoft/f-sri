@@ -6,10 +6,10 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, AutorizacionSRI, Respues
 import { generateWithholdingPDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import Withholding from '../models/Withholding';
 import WithholdingPDF from '../models/WithholdingPDF';
 import IssuingCompany from '../models/IssuingCompany';
-import fs from 'fs';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con
@@ -155,10 +155,7 @@ export class WithholdingService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
-
-      if (!p12Path || !fs.existsSync(p12Path)) {
+      if (!empresa.certificate || !empresa.certificate_password) {
         retencion.sri_estado = 'ERROR_FIRMA';
         retencion.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await retencion.save();
@@ -166,22 +163,14 @@ export class WithholdingService {
       }
 
       try {
-        const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-        if (!diagnosis.isValidP12) {
-          throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-        }
-
-        let workingPassword = p12Password;
-        const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-        if (!passwordVerification.valid) {
-          const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-          if (passwordSearch.password === null) {
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
+          if (!passwordVerification.valid) {
             throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
-          workingPassword = passwordSearch.password;
-        }
 
-        const xmlFirmado = await firmarXML(retencion.xml, p12Path, workingPassword, '07');
+          return firmarXML(retencion.xml, p12Path, p12Password, '07');
+        });
 
         retencion.xml_firmado = xmlFirmado;
         retencion.sri_fecha_envio = new Date();

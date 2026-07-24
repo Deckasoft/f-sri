@@ -1,5 +1,3 @@
-import fs from 'fs';
-
 const firmarXMLMock = jest.fn().mockResolvedValue('<comprobanteRetencion>firmada</comprobanteRetencion>');
 jest.mock('../../src/utils/firma.utils', () => ({
   firmarXML: (...args: any[]) => firmarXMLMock(...args),
@@ -26,11 +24,20 @@ jest.mock('../../src/services/storage', () => ({
 
 const invoiceServiceMocks = {
   buscarIssuingCompany: jest.fn(),
-  diagnoseP12Certificate: jest.fn(),
-  verifyP12Password: jest.fn(),
-  findWorkingP12Password: jest.fn(),
 };
 jest.mock('../../src/services/invoice.service', () => ({ InvoiceService: invoiceServiceMocks }));
+
+const withCompanyP12Mock = jest.fn(async (company: any, fn: (p: string, pw: string) => Promise<any>) => {
+  if (!company.certificate || !company.certificate_password) {
+    throw new Error('La empresa no tiene certificado digital configurado');
+  }
+  return fn('/tmp/cert.p12', 'test-cert-password');
+});
+const verifyP12PasswordMock = jest.fn().mockResolvedValue({ valid: true });
+jest.mock('../../src/utils/certificate.utils', () => ({
+  withCompanyP12: (...args: any[]) => (withCompanyP12Mock as any)(...args),
+  verifyP12Password: (...args: any[]) => (verifyP12PasswordMock as any)(...args),
+}));
 
 const withholdingStatics = { findOne: jest.fn(), findById: jest.fn() };
 jest.mock('../../src/models/Withholding', () => {
@@ -81,8 +88,8 @@ const empresaMock: any = {
   direccion_matriz: 'Av. Principal',
   direccion_establecimiento: 'Av. Principal',
   obligado_contabilidad: true,
-  certificatePath: '/tmp/cert.p12',
-  certificatePassword: 'test-cert-password',
+  certificate: 'encrypted-cert-base64',
+  certificate_password: 'encrypted-cert-password',
 };
 
 const requestValido: WithholdingRequest = {
@@ -208,7 +215,8 @@ describe('WithholdingService', () => {
 
   describe('crearRetencionCompleta', () => {
     it('creates the withholding with an 07 access key and the computed total retenido', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
+      // Skip the real signing flow in the fire-and-forget background call.
+      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
       const resultado = await WithholdingService.crearRetencionCompleta(requestValido);
 
@@ -220,7 +228,8 @@ describe('WithholdingService', () => {
     });
 
     it('always emits the mandatory <parteRel> tag (default NO) before razonSocialSujetoRetenido', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
+      // Skip the real signing flow in the fire-and-forget background call.
+      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
       const resultado = await WithholdingService.crearRetencionCompleta(requestValido);
 
@@ -231,7 +240,8 @@ describe('WithholdingService', () => {
     });
 
     it('respects an explicit parteRel value and emits tipoSujetoRetenido when provided', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
+      // Skip the real signing flow in the fire-and-forget background call.
+      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
       const request = JSON.parse(JSON.stringify(requestValido)) as WithholdingRequest;
       request.infoCompRetencion.parteRel = 'SI';
@@ -256,30 +266,22 @@ describe('WithholdingService', () => {
     });
 
     it('marks ERROR_FIRMA when there is no certificate', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
       const ret: any = doc();
 
-      await WithholdingService.procesarEnvioSRI(ret, { ...empresaMock, certificatePath: undefined }, requestValido);
+      await WithholdingService.procesarEnvioSRI(ret, { ...empresaMock, certificate: undefined }, requestValido);
 
       expect(ret.sri_estado).toBe('ERROR_FIRMA');
     });
 
     it('signs with tipoDocumento 07 and completes the RECIBIDA flow', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const programarSpy = jest.spyOn(WithholdingService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const ret: any = doc();
 
       await WithholdingService.procesarEnvioSRI(ret, empresaMock, requestValido);
 
-      expect(firmarXMLMock).toHaveBeenCalledWith(
-        '<comprobanteRetencion/>',
-        empresaMock.certificatePath,
-        'test-cert-password',
-        '07',
-      );
+      expect(firmarXMLMock).toHaveBeenCalledWith('<comprobanteRetencion/>', '/tmp/cert.p12', 'test-cert-password', '07');
       expect(ret.sri_estado).toBe('RECIBIDA');
       expect(generateWithholdingPDFMock).toHaveBeenCalled();
       expect(savedPDFs[0].estado).toBe('GENERADO');
@@ -287,9 +289,7 @@ describe('WithholdingService', () => {
     });
 
     it('marks ERROR_PROCESO when saving fails outside the signing block', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const ret: any = doc();
       // First save (xml_firmado) throws → captured by the outer catch

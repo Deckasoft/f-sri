@@ -6,10 +6,10 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, AutorizacionSRI, Respues
 import { generateDeliveryNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import DeliveryNote from '../models/DeliveryNote';
 import DeliveryNotePDF from '../models/DeliveryNotePDF';
 import IssuingCompany from '../models/IssuingCompany';
-import fs from 'fs';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con guías de remisión (codDoc 06)
@@ -149,10 +149,7 @@ export class DeliveryNoteService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
-
-      if (!p12Path || !fs.existsSync(p12Path)) {
+      if (!empresa.certificate || !empresa.certificate_password) {
         guiaRemision.sri_estado = 'ERROR_FIRMA';
         guiaRemision.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await guiaRemision.save();
@@ -160,22 +157,14 @@ export class DeliveryNoteService {
       }
 
       try {
-        const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-        if (!diagnosis.isValidP12) {
-          throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-        }
-
-        let workingPassword = p12Password;
-        const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-        if (!passwordVerification.valid) {
-          const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-          if (passwordSearch.password === null) {
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
+          if (!passwordVerification.valid) {
             throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
-          workingPassword = passwordSearch.password;
-        }
 
-        const xmlFirmado = await firmarXML(guiaRemision.xml, p12Path, workingPassword, '06');
+          return firmarXML(guiaRemision.xml, p12Path, p12Password, '06');
+        });
 
         guiaRemision.xml_firmado = xmlFirmado;
         guiaRemision.sri_fecha_envio = new Date();

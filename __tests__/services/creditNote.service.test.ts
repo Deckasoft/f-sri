@@ -1,5 +1,3 @@
-import fs from 'fs';
-
 // --- Mocks for collaborators ---
 const firmarXMLMock = jest.fn().mockResolvedValue('<notaCredito>firmada</notaCredito>');
 jest.mock('../../src/utils/firma.utils', () => ({
@@ -33,12 +31,23 @@ const invoiceServiceMocks = {
   buscarIssuingCompany: jest.fn(),
   buscarClient: jest.fn(),
   buscarProduct: jest.fn(),
-  diagnoseP12Certificate: jest.fn(),
-  verifyP12Password: jest.fn(),
-  findWorkingP12Password: jest.fn(),
 };
 jest.mock('../../src/services/invoice.service', () => ({
   InvoiceService: invoiceServiceMocks,
+}));
+
+// withCompanyP12's real temp-file lifecycle is covered by
+// certificate.utils.test.ts; here we just need to simulate its contract.
+const withCompanyP12Mock = jest.fn(async (company: any, fn: (p: string, pw: string) => Promise<any>) => {
+  if (!company.certificate || !company.certificate_password) {
+    throw new Error('La empresa no tiene certificado digital configurado');
+  }
+  return fn('/tmp/cert.p12', 'test-cert-password');
+});
+const verifyP12PasswordMock = jest.fn().mockResolvedValue({ valid: true });
+jest.mock('../../src/utils/certificate.utils', () => ({
+  withCompanyP12: (...args: any[]) => (withCompanyP12Mock as any)(...args),
+  verifyP12Password: (...args: any[]) => (verifyP12PasswordMock as any)(...args),
 }));
 
 // --- Model mocks ---
@@ -115,8 +124,8 @@ const empresaMock: any = {
   direccion_matriz: 'Av. Principal',
   direccion_establecimiento: 'Av. Principal',
   obligado_contabilidad: true,
-  certificatePath: '/tmp/cert.p12',
-  certificatePassword: 'test-cert-password',
+  certificate: 'encrypted-cert-base64',
+  certificate_password: 'encrypted-cert-password',
 };
 
 const clienteMock: any = { _id: 'cliente-1', razon_social: 'CLIENTE', identificacion: '0106079783' };
@@ -250,7 +259,9 @@ describe('CreditNoteService', () => {
 
   describe('crearNotaCreditoCompleta', () => {
     beforeEach(() => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false); // skip real SRI flow in background
+      // Skip the real signing flow in the fire-and-forget background call by
+      // resolving an empresa without a certificate configured.
+      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
     });
 
     it('creates the credit note with an 04 access key, XML and details', async () => {
@@ -277,12 +288,11 @@ describe('CreditNoteService', () => {
     });
 
     it('marks ERROR_FIRMA when there is no certificate', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(
         doc,
-        { ...empresaMock, certificatePath: undefined },
+        { ...empresaMock, certificate: undefined },
         clienteMock,
         [],
         requestValido,
@@ -293,21 +303,14 @@ describe('CreditNoteService', () => {
     });
 
     it('signs with tipoDocumento 04, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const programarSpy = jest.spyOn(CreditNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [productoMock], requestValido);
 
-      expect(firmarXMLMock).toHaveBeenCalledWith(
-        '<notaCredito/>',
-        empresaMock.certificatePath,
-        'test-cert-password',
-        '04',
-      );
+      expect(firmarXMLMock).toHaveBeenCalledWith('<notaCredito/>', '/tmp/cert.p12', 'test-cert-password', '04');
       expect(doc.xml_firmado).toBe('<notaCredito>firmada</notaCredito>');
       expect(doc.sri_estado).toBe('RECIBIDA');
       expect(generateCreditNotePDFMock).toHaveBeenCalled();
@@ -316,9 +319,7 @@ describe('CreditNoteService', () => {
     });
 
     it('records the DEVUELTA state without generating a PDF', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({
         estado: 'DEVUELTA',
         mensajes: { mensaje: { identificador: '35' } },
@@ -332,31 +333,15 @@ describe('CreditNoteService', () => {
       expect(generateCreditNotePDFMock).not.toHaveBeenCalled();
     });
 
-    it('falls back to an alternative password when verification fails', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: false, error: 'bad mac' });
-      invoiceServiceMocks.findWorkingP12Password.mockResolvedValue({ password: 'test-fallback-password' });
-      enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      jest.spyOn(CreditNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
-      const doc = notaCreditoDoc();
-
-      await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [], requestValido);
-
-      expect(firmarXMLMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'test-fallback-password', '04');
-    });
-
-    it('marks ERROR_FIRMA when no password works', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: false, error: 'bad mac' });
-      invoiceServiceMocks.findWorkingP12Password.mockResolvedValue({ password: null });
+    it('marks ERROR_FIRMA when the password is wrong (no brute-force fallback)', async () => {
+      verifyP12PasswordMock.mockResolvedValue({ valid: false, error: 'bad mac' });
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [], requestValido);
 
       expect(doc.sri_estado).toBe('ERROR_FIRMA');
       expect(doc.sri_mensajes.error).toContain('contraseña');
+      expect(firmarXMLMock).not.toHaveBeenCalled();
     });
   });
 

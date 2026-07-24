@@ -8,6 +8,21 @@ jest.mock('../../src/utils/firma.utils', () => ({
   firmarXML: (...args: any[]) => firmarXMLMock(...args),
 }));
 
+// withCompanyP12 is exercised for real in certificate.utils.test.ts; here we
+// only need to simulate its contract: call fn with a path/password pair, or
+// reject when there is no certificate configured.
+const withCompanyP12Mock = jest.fn(async (company: any, fn: (p: string, pw: string) => Promise<any>) => {
+  if (!company.certificate || !company.certificate_password) {
+    throw new Error('La empresa no tiene certificado digital configurado');
+  }
+  return fn(p12Path, P12_PASSWORD);
+});
+const verifyP12PasswordMock = jest.fn().mockResolvedValue({ valid: true });
+jest.mock('../../src/utils/certificate.utils', () => ({
+  withCompanyP12: (...args: any[]) => (withCompanyP12Mock as any)(...args),
+  verifyP12Password: (...args: any[]) => (verifyP12PasswordMock as any)(...args),
+}));
+
 const enviarComprobanteSRIMock = jest.fn();
 const autorizarComprobanteSRIMock = jest.fn();
 jest.mock('../../src/utils/sri.utils', () => ({
@@ -76,6 +91,15 @@ jest.mock('../../src/models/IdentificationType', () => ({
   __esModule: true,
   default: { findOne: (...args: any[]) => identificationTypeStatics.findOne(...args) },
 }));
+
+// Mimics a Mongoose Query: awaitable directly (generarSecuencial does
+// `await IssuingCompany.findOne(...)`) and chainable via .select() (used by
+// buscarIssuingCompany to pull in the select:false certificate fields).
+function mockQuery(value: any) {
+  const query: any = Promise.resolve(value);
+  query.select = jest.fn().mockResolvedValue(value);
+  return query;
+}
 
 const issuingCompanyStatics = { findOne: jest.fn() };
 jest.mock('../../src/models/IssuingCompany', () => ({
@@ -186,7 +210,7 @@ describe('InvoiceService', () => {
     savedDetails.length = 0;
     savedPDFs.length = 0;
     identificationTypeStatics.findOne.mockResolvedValue({ codigo: '05' });
-    issuingCompanyStatics.findOne.mockResolvedValue(empresaBase());
+    issuingCompanyStatics.findOne.mockReturnValue(mockQuery(empresaBase()));
     clientStatics.findOne.mockResolvedValue(clienteMock);
     productStatics.findOne.mockResolvedValue(productoMock);
     invoiceStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
@@ -208,48 +232,41 @@ describe('InvoiceService', () => {
     });
 
     it('throws when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue(null);
+      issuingCompanyStatics.findOne.mockReturnValue(mockQuery(null));
 
       await expect(InvoiceService.generarSecuencial('999')).rejects.toThrow('not found');
     });
   });
 
   describe('buscarIssuingCompany', () => {
-    it('returns the empresa without certificate data when none is stored', async () => {
+    it('returns the empresa without materializing any certificate file', async () => {
+      issuingCompanyStatics.findOne.mockReturnValue(
+        mockQuery({ ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD }),
+      );
+
       const empresa = await InvoiceService.buscarIssuingCompany('1790012345001');
 
+      // buscarIssuingCompany only fetches the (encrypted) fields; it must no
+      // longer write anything to disk. Materializing the P12 happens later,
+      // inside procesarEnvioSRI via withCompanyP12, for the shortest possible
+      // lifetime.
       expect(empresa?.ruc).toBe('1790012345001');
-      expect(empresa?.certificatePath).toBeUndefined();
+      expect(empresa?.certificate).toBe(p12Base64);
+      expect(empresa?.certificate_password).toBe(P12_PASSWORD);
+      expect(issuingCompanyStatics.findOne).toHaveBeenCalledWith({ ruc: '1790012345001' });
     });
 
-    it('materializes the base64 certificate into a temp P12 file', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue({
-        ...empresaBase(),
-        certificate: p12Base64,
-        certificate_password: P12_PASSWORD,
-      });
+    it('selects the select:false certificate fields explicitly', async () => {
+      const selectSpy = jest.fn().mockResolvedValue(empresaBase());
+      issuingCompanyStatics.findOne.mockReturnValue({ select: selectSpy });
 
-      const empresa = await InvoiceService.buscarIssuingCompany('1790012345001');
+      await InvoiceService.buscarIssuingCompany('1790012345001');
 
-      expect(empresa?.certificatePath).toBeDefined();
-      expect(fs.existsSync(empresa!.certificatePath!)).toBe(true);
-      expect(empresa?.certificatePassword).toBe(P12_PASSWORD);
-    });
-
-    it('falls back to the raw password when decryption fails', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue({
-        ...empresaBase(),
-        certificate: p12Base64,
-        certificate_password: 'test:fake-encrypted-format',
-      });
-
-      const empresa = await InvoiceService.buscarIssuingCompany('1790012345001');
-
-      expect(empresa?.certificatePassword).toBe('test:fake-encrypted-format');
+      expect(selectSpy).toHaveBeenCalledWith('+certificate +certificate_password');
     });
 
     it('returns null when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue(null);
+      issuingCompanyStatics.findOne.mockReturnValue(mockQuery(null));
 
       await expect(InvoiceService.buscarIssuingCompany('999')).resolves.toBeNull();
     });
@@ -270,7 +287,7 @@ describe('InvoiceService', () => {
         () => identificationTypeStatics.findOne.mockResolvedValue(null),
         'Identification type not found',
       ],
-      ['empresa', () => issuingCompanyStatics.findOne.mockResolvedValue(null), 'Empresa emisora no encontrada'],
+      ['empresa', () => issuingCompanyStatics.findOne.mockReturnValue(mockQuery(null)), 'Empresa emisora no encontrada'],
       ['client', () => clientStatics.findOne.mockResolvedValue(null), 'Client not found'],
     ])('fails when the %s is missing', async (_n, arrange, mensaje) => {
       arrange();
@@ -301,22 +318,8 @@ describe('InvoiceService', () => {
   });
 
   describe('P12 helpers (real certificate)', () => {
-    it('verifyP12Password accepts the right password and rejects a wrong one', async () => {
-      await expect(InvoiceService.verifyP12Password(p12Path, P12_PASSWORD)).resolves.toEqual({ valid: true });
-
-      const wrong = await InvoiceService.verifyP12Password(p12Path, 'incorrecta');
-      expect(wrong.valid).toBe(false);
-      expect(wrong.error).toBeDefined();
-    });
-
-    it('findWorkingP12Password finds the original password and fails when none works', async () => {
-      await expect(InvoiceService.findWorkingP12Password(p12Path, P12_PASSWORD)).resolves.toEqual({
-        password: P12_PASSWORD,
-      });
-
-      const ninguna = await InvoiceService.findWorkingP12Password(p12Path, 'incorrecta');
-      expect(ninguna.password).toBeNull();
-    });
+    // verifyP12Password and the P12 temp-file lifecycle now live in
+    // certificate.utils.ts and are covered by certificate.utils.test.ts.
 
     it('convertP12ToPem produces a combined PEM with key and certificate', async () => {
       const pemPath = await InvoiceService.convertP12ToPem(p12Path, P12_PASSWORD);
@@ -329,24 +332,6 @@ describe('InvoiceService', () => {
 
     it('convertP12ToPem throws a password error for a wrong password', async () => {
       await expect(InvoiceService.convertP12ToPem(p12Path, 'incorrecta')).rejects.toThrow('contraseña');
-    });
-
-    it('diagnoseP12Certificate reports a healthy certificate', async () => {
-      const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, P12_PASSWORD);
-
-      expect(diagnosis.fileExists).toBe(true);
-      expect(diagnosis.isValidP12).toBe(true);
-      expect(diagnosis.passwordWorks).toBe(true);
-      expect(diagnosis.certificateInfo?.subject).toContain('JUAN PEREZ');
-    });
-
-    it('diagnoseP12Certificate reports missing files and wrong passwords', async () => {
-      const missing = await InvoiceService.diagnoseP12Certificate('/tmp/no-existe.p12', 'x');
-      expect(missing.fileExists).toBe(false);
-
-      const badPass = await InvoiceService.diagnoseP12Certificate(p12Path, 'incorrecta');
-      expect(badPass.passwordWorks).toBe(false);
-      expect(badPass.error).toContain('contraseña');
     });
   });
 
@@ -363,16 +348,17 @@ describe('InvoiceService', () => {
     it('marks ERROR_FIRMA when there is no certificate', async () => {
       const factura: any = facturaDoc();
 
-      await InvoiceService.procesarEnvioSRI(factura, { certificatePath: undefined }, clienteMock, [], requestValido);
+      await InvoiceService.procesarEnvioSRI(factura, { certificate: undefined }, clienteMock, [], requestValido);
 
       expect(factura.sri_estado).toBe('ERROR_FIRMA');
+      expect(withCompanyP12Mock).not.toHaveBeenCalled();
     });
 
     it('signs with the real P12, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const programarSpy = jest.spyOn(InvoiceService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const factura: any = facturaDoc();
-      const empresa = { ...empresaBase(), certificatePath: p12Path, certificatePassword: P12_PASSWORD };
+      const empresa = { ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD };
 
       await InvoiceService.procesarEnvioSRI(factura, empresa, clienteMock, [productoMock], requestValido);
 
@@ -389,7 +375,7 @@ describe('InvoiceService', () => {
         mensajes: { mensaje: { identificador: '35' } },
       });
       const factura: any = facturaDoc();
-      const empresa = { ...empresaBase(), certificatePath: p12Path, certificatePassword: P12_PASSWORD };
+      const empresa = { ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD };
 
       await InvoiceService.procesarEnvioSRI(factura, empresa, clienteMock, [], requestValido);
 
