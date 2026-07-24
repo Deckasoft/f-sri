@@ -38,8 +38,11 @@ const schema = new Schema<IIssuingCompany>(
     obligado_contabilidad: { type: Boolean, default: false },
     contribuyente_especial: { type: String },
     email_notificacion: { type: String },
-    certificate: { type: String },
-    certificate_password: { type: String },
+    // select: false so IssuingCompany.find()/findOne() never leak these fields
+    // by default; callers that need to sign a document must explicitly
+    // .select('+certificate +certificate_password').
+    certificate: { type: String, select: false },
+    certificate_password: { type: String, select: false },
     user_id: { type: Schema.Types.ObjectId, ref: 'User', required: true },
   },
   {

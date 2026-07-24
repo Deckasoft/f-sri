@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import IssuingCompany from '../models/IssuingCompany';
-import fs from 'fs';
 import { encrypt } from '../utils/encryption.utils';
 
 const router = Router();
@@ -26,19 +25,24 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const { certificatePath, certificate, certificatePassword, certificate_password, ...rest } = req.body;
-
-    let certBase64 = certificate;
-    if (certificatePath) {
-      certBase64 = fs.readFileSync(certificatePath).toString('base64');
-    }
+    // NOTE: certificatePath is intentionally not accepted here. Reading a
+    // certificate from an arbitrary server-side path was an unauthenticated
+    // file-read vulnerability reachable by any logged-in user; the caller
+    // must now send the certificate bytes (base64) directly in the body.
+    const {
+      certificatePath: _ignoredCertificatePath,
+      certificate,
+      certificate_password,
+      certificatePassword,
+      ...rest
+    } = req.body;
 
     // Use certificate_password or certificatePassword, whichever is available
     const passwordToEncrypt = certificate_password || certificatePassword;
     const encryptedPass = passwordToEncrypt ? encrypt(passwordToEncrypt) : undefined;
 
     const updateData: any = { ...rest };
-    if (certBase64) updateData.certificate = certBase64;
+    if (certificate) updateData.certificate = encrypt(certificate);
     if (encryptedPass) updateData.certificate_password = encryptedPass;
 
     const doc = await IssuingCompany.findByIdAndUpdate(req.params.id, updateData, { new: true });

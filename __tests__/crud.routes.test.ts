@@ -245,22 +245,38 @@ describe('IssuingCompany routes', () => {
     expect(res.status).toBe(200);
   });
 
-  it('re-encrypts the certificate password and reads a certificate file on update', async () => {
-    const fs = require('fs');
-    jest.spyOn(fs, 'readFileSync').mockReturnValueOnce(Buffer.from('p12-bytes'));
+  it('encrypts the certificate and password at rest on update', async () => {
     issuingCompanyMock.statics.findByIdAndUpdate.mockResolvedValueOnce({ _id: ID });
 
     const res = await request(app)
       .put(`/api/v1/issuing-company/${ID}`)
       .set('Authorization', authHeader)
-      .send({ certificatePath: '/tmp/cert.p12', certificate_password: 'test-new-cert-password', razon_social: 'X' });
+      .send({ certificate: 'cGxhaW4tcDEyLWJhc2U2NA==', certificate_password: 'test-new-cert-password', razon_social: 'X' });
 
     expect(res.status).toBe(200);
     const [, updateData] = issuingCompanyMock.statics.findByIdAndUpdate.mock.calls[0];
-    expect(updateData.certificate).toBe(Buffer.from('p12-bytes').toString('base64'));
+    expect(updateData.certificate).toBeDefined();
+    expect(updateData.certificate).not.toBe('cGxhaW4tcDEyLWJhc2U2NA=='); // stored encrypted
     expect(updateData.certificate_password).toBeDefined();
     expect(updateData.certificate_password).not.toBe('test-new-cert-password'); // stored encrypted
-    jest.restoreAllMocks();
+  });
+
+  it('ignores a certificatePath field and never reads from the filesystem (fixes the arbitrary file-read bug)', async () => {
+    const fs = require('fs');
+    const readSpy = jest.spyOn(fs, 'readFileSync');
+    issuingCompanyMock.statics.findByIdAndUpdate.mockResolvedValueOnce({ _id: ID });
+
+    const res = await request(app)
+      .put(`/api/v1/issuing-company/${ID}`)
+      .set('Authorization', authHeader)
+      .send({ certificatePath: '/etc/passwd', razon_social: 'X' });
+
+    expect(res.status).toBe(200);
+    expect(readSpy).not.toHaveBeenCalled();
+    const [, updateData] = issuingCompanyMock.statics.findByIdAndUpdate.mock.calls[0];
+    expect(updateData.certificatePath).toBeUndefined();
+    expect(updateData.certificate).toBeUndefined();
+    readSpy.mockRestore();
   });
 
   it('returns 404 when updating or deleting a missing company', async () => {

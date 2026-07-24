@@ -4,6 +4,7 @@ import jwt from 'jsonwebtoken';
 import User from '../models/User';
 import IssuingCompany from '../models/IssuingCompany';
 import { encrypt } from '../utils/encryption.utils';
+import { authLimiter } from '../config/rateLimit.config';
 
 const router = Router();
 
@@ -74,7 +75,7 @@ async function validateRegistrationSecurity(req: any): Promise<{ valid: boolean;
   return { valid: true };
 }
 
-router.post('/register', async (req, res) => {
+router.post('/register', authLimiter, async (req, res) => {
   const {
     email,
     password,
@@ -163,7 +164,7 @@ router.post('/register', async (req, res) => {
       punto_emision: punto_emision || '001',
       tipo_ambiente: tipo_ambiente || 1,
       tipo_emision: tipo_emision || 1,
-      certificate: certificate, // Certificado en base64 (se almacena tal cual)
+      certificate: encrypt(certificate), // Certificado en base64, cifrado en reposo
       certificate_password: encryptedPassword,
       user_id: user._id,
     });
@@ -194,7 +195,7 @@ router.post('/register', async (req, res) => {
   }
 });
 
-router.post('/auth', async (req, res) => {
+router.post('/auth', authLimiter, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) {
     return res.status(400).json({ message: 'Email y contraseña requeridos' });
