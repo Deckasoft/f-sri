@@ -1,5 +1,4 @@
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import { createApp } from '../src/testApp';
 
 // --- Model mocks ---
@@ -47,9 +46,32 @@ jest.mock('../src/services/delivery-note.service', () => ({
   },
 }));
 
+// --- ApiKey mock (apiKeyAuth runs on every /api/v1/* request) ---
+const apiKeyStaticMocks = {
+  findOne: jest.fn(),
+  findByIdAndUpdate: jest.fn().mockResolvedValue(null),
+};
+jest.mock('../src/models/ApiKey', () => ({
+  __esModule: true,
+  default: {
+    findOne: (...args: any[]) => {
+      const result = Promise.resolve(apiKeyStaticMocks.findOne(...args));
+      const query: any = result;
+      query.populate = () => result;
+      return query;
+    },
+    findByIdAndUpdate: (...args: any[]) => apiKeyStaticMocks.findByIdAndUpdate(...args),
+  },
+}));
+apiKeyStaticMocks.findOne.mockResolvedValue({
+  _id: 'api-key-1',
+  revoked_at: undefined,
+  last_used_at: undefined,
+  empresa_emisora_id: { _id: 'company-1', active: true },
+});
+
 const app = createApp();
-const token = jwt.sign({ userId: '1' }, process.env.JWT_SECRET as string);
-const authHeader = `Bearer ${token}`;
+const authHeader = 'sk_live_test_token_1234567890';
 
 const guiaRemisionPayload = {
   infoTributaria: { ruc: '1790012345001' },
@@ -78,7 +100,7 @@ describe('Delivery note routes', () => {
     });
 
     it('returns 400 when guia_remision is missing', async () => {
-      const res = await request(app).post('/api/v1/delivery-note/complete').set('Authorization', authHeader).send({});
+      const res = await request(app).post('/api/v1/delivery-note/complete').set('X-API-Key', authHeader).send({});
 
       expect(res.status).toBe(400);
       expect(res.body.success).toBe(false);
@@ -96,7 +118,7 @@ describe('Delivery note routes', () => {
 
       const res = await request(app)
         .post('/api/v1/delivery-note/complete')
-        .set('Authorization', authHeader)
+        .set('X-API-Key', authHeader)
         .send({ guia_remision: guiaRemisionPayload });
 
       expect(res.status).toBe(201);
@@ -112,7 +134,7 @@ describe('Delivery note routes', () => {
 
       const res = await request(app)
         .post('/api/v1/delivery-note/complete')
-        .set('Authorization', authHeader)
+        .set('X-API-Key', authHeader)
         .send({ guia_remision: guiaRemisionPayload });
 
       expect(res.status).toBe(400);
@@ -124,7 +146,7 @@ describe('Delivery note routes', () => {
 
       const res = await request(app)
         .post('/api/v1/delivery-note/complete')
-        .set('Authorization', authHeader)
+        .set('X-API-Key', authHeader)
         .send({ guia_remision: guiaRemisionPayload });
 
       expect(res.status).toBe(500);
@@ -136,16 +158,14 @@ describe('Delivery note routes', () => {
     it('lists delivery notes', async () => {
       deliveryNoteStaticMocks.find.mockResolvedValueOnce([{ secuencial: '000000001' }]);
 
-      const res = await request(app).get('/api/v1/delivery-note').set('Authorization', authHeader);
+      const res = await request(app).get('/api/v1/delivery-note').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(1);
     });
 
     it('returns 404 for a missing delivery note', async () => {
-      const res = await request(app)
-        .get('/api/v1/delivery-note/507f1f77bcf86cd799439011')
-        .set('Authorization', authHeader);
+      const res = await request(app).get('/api/v1/delivery-note/507f1f77bcf86cd799439011').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(404);
     });
@@ -153,9 +173,7 @@ describe('Delivery note routes', () => {
     it('returns a delivery note by id', async () => {
       deliveryNoteStaticMocks.findById.mockResolvedValueOnce({ secuencial: '000000001' });
 
-      const res = await request(app)
-        .get('/api/v1/delivery-note/507f1f77bcf86cd799439011')
-        .set('Authorization', authHeader);
+      const res = await request(app).get('/api/v1/delivery-note/507f1f77bcf86cd799439011').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body.secuencial).toBe('000000001');
@@ -166,7 +184,7 @@ describe('Delivery note routes', () => {
 
       const res = await request(app)
         .get('/api/v1/delivery-note/507f1f77bcf86cd799439011/pdf')
-        .set('Authorization', authHeader);
+        .set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body.pdf_url).toBe('https://cdn/pdf.pdf');
@@ -177,7 +195,7 @@ describe('Delivery note routes', () => {
 
       const res = await request(app)
         .delete('/api/v1/delivery-note/507f1f77bcf86cd799439011')
-        .set('Authorization', authHeader);
+        .set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body.message).toBe('Deleted');

@@ -1,5 +1,4 @@
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import { createApp } from '../src/testApp';
 
 // Mock puppeteer before any imports that might use it
@@ -30,6 +29,30 @@ jest.mock('../src/models/InvoicePDF', () => {
     save = invoicePDFInstanceMocks.save;
   }
   return { __esModule: true, default: MockInvoicePDF };
+});
+
+// --- ApiKey mock (apiKeyAuth runs on every /api/v1/* request) ---
+const apiKeyStaticMocks = {
+  findOne: jest.fn(),
+  findByIdAndUpdate: jest.fn().mockResolvedValue(null),
+};
+jest.mock('../src/models/ApiKey', () => ({
+  __esModule: true,
+  default: {
+    findOne: (...args: any[]) => {
+      const result = Promise.resolve(apiKeyStaticMocks.findOne(...args));
+      const query: any = result;
+      query.populate = () => result;
+      return query;
+    },
+    findByIdAndUpdate: (...args: any[]) => apiKeyStaticMocks.findByIdAndUpdate(...args),
+  },
+}));
+apiKeyStaticMocks.findOne.mockResolvedValue({
+  _id: 'api-key-1',
+  revoked_at: undefined,
+  last_used_at: undefined,
+  empresa_emisora_id: { _id: 'company-1', active: true },
 });
 
 // --- Helper to create method mocks ---
@@ -319,8 +342,7 @@ process.env.JWT_SECRET = 'secret';
 // Must stay a valid 64 hex char key: createApp() now validates ENCRYPTION_KEY
 // via loadEnv() (see src/config/env.config.ts) before wiring the app.
 process.env.ENCRYPTION_KEY = 'a'.repeat(64);
-const token = jwt.sign({ userId: '1' }, process.env.JWT_SECRET);
-const authHeader = `Bearer ${token}`;
+const authHeader = 'sk_live_test_token_1234567890';
 const app = createApp();
 
 // File system mock for tests
@@ -340,79 +362,6 @@ jest.mock('fs', () => ({
   }),
 }));
 
-describe('Auth endpoints', () => {
-  beforeEach(() => {
-    // Reset mocks for User before each auth test
-    UserControl.findOne.mockResolvedValue(null); // Default to user not found
-    UserControl.save.mockClear(); // Clear previous save calls
-    userStaticMocks.findOne.mockResolvedValue({ password: 'hashed', _id: '1' });
-
-    // Mock IssuingCompany for registration tests
-    issuingCompany.findOne.mockResolvedValue(null); // No existing company
-    issuingCompany.save.mockImplementation(mockSaveWithToObject());
-
-    // Mock environment variables for security
-    process.env.MASTER_REGISTRATION_KEY = 'test_master_key';
-
-    // Mock User and IssuingCompany countDocuments for first registration check
-    const UserMock = jest.requireMock('../src/models/User').default;
-    const IssuingCompanyMock = jest.requireMock('../src/models/IssuingCompany').default;
-    UserMock.countDocuments = jest.fn().mockResolvedValue(0); // First registration
-    IssuingCompanyMock.countDocuments = jest.fn().mockResolvedValue(0); // First registration
-  });
-
-  it('registers a user', async () => {
-    userStaticMocks.findOne.mockResolvedValueOnce(null); // Ensure user doesn't exist for registration
-    userInstanceMocks.save.mockResolvedValueOnce({ _id: '1', email: 'a@b.c' }); // Mock save result
-    issuingCompany.findOne.mockResolvedValueOnce(null); // No existing company
-
-    const registrationData = {
-      email: 'a@b.c',
-      password: 'pass',
-      ruc: '1234567890001',
-      razon_social: 'Test Company',
-      masterKey: 'test_master_key',
-      certificate: 'MIIJqQIBAzCCCW8GCSqGSIb3DQEHAaCCCWAEgglcMIIJWDCCBW8GCSqGSIb3', // Mock base64 certificate
-      certificate_password: 'test_cert_password',
-    };
-
-    const res = await request(app).post('/register').send(registrationData);
-    expect(res.status).toBe(201);
-    expect(userInstanceMocks.save).toHaveBeenCalled();
-    expect(issuingCompany.save).toHaveBeenCalled();
-  });
-
-  it('authenticates a user', async () => {
-    const tokenRes = 'token';
-    // Mock bcrypt comparison
-    const bcrypt = require('bcryptjs');
-    jest.spyOn(bcrypt, 'compare').mockResolvedValueOnce(true);
-
-    // Ensure that the User.findOne mock resolves to the expected user for authentication
-    userStaticMocks.findOne.mockResolvedValueOnce({
-      password: '$2a$10$hashedPassword',
-      _id: 'userId123',
-      email: 'a@b.c',
-    });
-
-    // Mock company lookup
-    issuingCompany.findOne.mockResolvedValueOnce({
-      _id: 'companyId1',
-      ruc: '1234567890001',
-      razon_social: 'Test Company',
-      nombre_comercial: 'Test Company',
-    });
-
-    // Mock jwt.sign
-    jest.spyOn(require('jsonwebtoken'), 'sign').mockReturnValueOnce(tokenRes as any);
-
-    const res = await request(app).post('/auth').send({ email: 'a@b.c', password: 'pass' });
-    expect(res.status).toBe(200);
-    expect(res.body.token).toBe(tokenRes);
-    expect(userStaticMocks.findOne).toHaveBeenCalledWith({ email: 'a@b.c' });
-  });
-});
-
 describe('CRUD endpoints', () => {
   beforeEach(() => {
     // Reset relevant mocks, e.g., for identification-type
@@ -429,18 +378,18 @@ describe('CRUD endpoints', () => {
     identificationType.save.mockResolvedValueOnce({ _id: 'newId', code: '01', name: 'Cedula' });
     const res = await request(app)
       .post('/api/v1/identification-type')
-      .set('Authorization', authHeader)
+      .set('X-API-Key', authHeader)
       .send({ code: '01', name: 'Cedula' });
     expect(res.status).toBe(201);
     expect(identificationType.save).toHaveBeenCalled();
   });
   it('gets identification-type list', async () => {
-    const res = await request(app).get('/api/v1/identification-type').set('Authorization', authHeader);
+    const res = await request(app).get('/api/v1/identification-type').set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
     expect(identificationType.find).toHaveBeenCalled();
   });
   it('gets identification-type by id', async () => {
-    const res = await request(app).get('/api/v1/identification-type/1').set('Authorization', authHeader);
+    const res = await request(app).get('/api/v1/identification-type/1').set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
     expect(identificationType.findById).toHaveBeenCalledWith('1');
   });
@@ -448,7 +397,7 @@ describe('CRUD endpoints', () => {
     identificationType.findByIdAndUpdate.mockResolvedValueOnce({ _id: '1', code: '01', name: 'Cedula Actualizada' });
     const res = await request(app)
       .put('/api/v1/identification-type/1')
-      .set('Authorization', authHeader)
+      .set('X-API-Key', authHeader)
       .send({ name: 'Cedula Actualizada' });
     expect(res.status).toBe(200);
     expect(identificationType.findByIdAndUpdate).toHaveBeenCalledWith(
@@ -459,7 +408,7 @@ describe('CRUD endpoints', () => {
   });
   it('deletes identification-type', async () => {
     identificationType.findByIdAndDelete.mockResolvedValueOnce({ _id: '1' });
-    const res = await request(app).delete('/api/v1/identification-type/1').set('Authorization', authHeader);
+    const res = await request(app).delete('/api/v1/identification-type/1').set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
     expect(identificationType.findByIdAndDelete).toHaveBeenCalledWith('1');
   });
@@ -619,7 +568,7 @@ describe('Factura complete endpoint', () => {
     invoice.save.mockImplementation(mockSaveWithToObject());
     invoiceDetail.save.mockImplementation(mockSaveWithToObject());
 
-    const res = await request(app).post('/api/v1/invoice/complete').set('Authorization', authHeader).send(payload);
+    const res = await request(app).post('/api/v1/invoice/complete').set('X-API-Key', authHeader).send(payload);
 
     if (res.status !== 201) {
       console.log('Test Response Body on Error:', res.body);
@@ -690,7 +639,7 @@ describe('Factura complete endpoint', () => {
     // El producto no existe (esto causa el error)
     product.findOne.mockResolvedValueOnce(null);
 
-    const res = await request(app).post('/api/v1/invoice/complete').set('Authorization', authHeader).send(payload);
+    const res = await request(app).post('/api/v1/invoice/complete').set('X-API-Key', authHeader).send(payload);
     expect(res.status).toBe(400);
     expect(res.body.message).toContain('Product not found: P001');
   });
@@ -750,7 +699,7 @@ describe('Factura complete endpoint', () => {
       .mockImplementation(() => Promise.resolve());
 
     // Call the invoice creation endpoint
-    const res = await request(app).post('/api/v1/invoice/complete').set('Authorization', authHeader).send(payload);
+    const res = await request(app).post('/api/v1/invoice/complete').set('X-API-Key', authHeader).send(payload);
 
     // Verify that the endpoint returns 201 without waiting for SRI
     expect(res.status).toBe(201);
