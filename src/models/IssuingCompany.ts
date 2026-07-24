@@ -18,7 +18,14 @@ export interface IIssuingCompany extends Document {
   email_notificacion?: string;
   certificate?: string;
   certificate_password?: string;
-  user_id: Types.ObjectId; // Reference to User
+  // Vestigial once tenants are provisioned by admins rather than tied 1:1 to
+  // a registering User (the /register flow that created this coupling was
+  // retired in Phase 2) — kept optional rather than removed since later
+  // phases may still reference it.
+  user_id?: Types.ObjectId;
+  active: boolean;
+  onboarded_at?: Date;
+  created_by?: Types.ObjectId; // Reference to the admin User who provisioned this tenant
 }
 
 const schema = new Schema<IIssuingCompany>(
@@ -43,7 +50,10 @@ const schema = new Schema<IIssuingCompany>(
     // .select('+certificate +certificate_password').
     certificate: { type: String, select: false },
     certificate_password: { type: String, select: false },
-    user_id: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+    user_id: { type: Schema.Types.ObjectId, ref: 'User' },
+    active: { type: Boolean, required: true, default: true },
+    onboarded_at: { type: Date },
+    created_by: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   {
     timestamps: true, // Add createdAt and updatedAt
