@@ -16,8 +16,8 @@ import helmet from 'helmet';
 import { getCorsConfig } from './config/cors.config';
 import { generalLimiter } from './config/rateLimit.config';
 import swaggerSpec from './swagger';
-import authRoutes from './routes/auth';
 import corsTestRoutes from './routes/cors-test';
+import adminAuthRoutes from './routes/admin/auth';
 import identificationTypeRoutes from './routes/identificationType';
 import issuingCompanyRoutes from './routes/issuingCompany';
 import clientRoutes from './routes/client';
@@ -29,7 +29,8 @@ import deliveryNoteRoutes from './routes/deliveryNote';
 import withholdingRoutes from './routes/withholding';
 import invoiceDetailRoutes from './routes/invoiceDetail';
 import invoicePDFRoutes from './routes/invoicePDF';
-import verifyToken from './middleware/verifyToken';
+import { apiKeyAuth } from './middleware/apiKeyAuth';
+import { adminAuth } from './middleware/adminAuth';
 import corsErrorHandler from './middleware/corsErrorHandler';
 
 const app = express();
@@ -60,8 +61,6 @@ app.use((req, res, next) => {
 // Middleware para parsear JSON
 app.use(express.json());
 
-// Rutas públicas (sin autenticación)
-app.use(authRoutes);
 app.use(corsTestRoutes);
 
 const swaggerHtml = `<!DOCTYPE html>
@@ -100,11 +99,8 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// General rate limiter for all API routes
-app.use('/api/v1', generalLimiter);
-
-// Authentication middleware for protected routes
-app.use(verifyToken);
+// General rate limiter + per-tenant API key auth for the invoicing API
+app.use('/api/v1', generalLimiter, apiKeyAuth);
 app.use('/api/v1/identification-type', identificationTypeRoutes);
 app.use('/api/v1/issuing-company', issuingCompanyRoutes);
 app.use('/api/v1/client', clientRoutes);
@@ -116,6 +112,13 @@ app.use('/api/v1/delivery-note', deliveryNoteRoutes);
 app.use('/api/v1/withholding', withholdingRoutes);
 app.use('/api/v1/invoice-detail', invoiceDetailRoutes);
 app.use('/api/v1/invoice-pdf', invoicePDFRoutes);
+
+// Admin backoffice API (Phase 4 builds on this). Login is public; the
+// adminAuth guard registered below it protects everything mounted after.
+app.use('/admin/api/auth', adminAuthRoutes);
+app.use('/admin/api', adminAuth);
+// Phase 4: additional admin routers mount here, e.g.
+// app.use('/admin/api/companies', companiesRoutes);
 
 // Error handling middleware (debe ir al final)
 app.use(corsErrorHandler);
