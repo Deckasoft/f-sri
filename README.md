@@ -18,7 +18,7 @@
 ## 🚀 Características Principales
 
 - ✅ **Facturación Electrónica Completa** - Generación, firma y envío al SRI
-- 🔐 **Sistema de Registro Seguro** - Control multi-capa de acceso
+- 🔐 **API Keys por Tenant** - Acceso a la API de facturación mediante claves provisionadas por un administrador
 - 📱 **API RESTful Completa** - Documentación con Swagger/OpenAPI
 - 🏢 **Multi-empresa** - Gestión de múltiples empresas emisoras
 - 📄 **PDFs Automáticos** - Generación y almacenamiento en la nube (Cloudinary/Local)
@@ -96,7 +96,6 @@ MONGODB_URI=mongodb://localhost:27017/f-sri
 # Seguridad
 JWT_SECRET=tu_clave_jwt_super_secreta_aqui
 ENCRYPTION_KEY=clave_encriptacion_32_caracteres!!
-MASTER_REGISTRATION_KEY=clave_maestra_super_secreta
 
 # Servidor
 PORT=3000
@@ -116,50 +115,23 @@ CLOUDINARY_API_KEY=tu_api_key
 CLOUDINARY_API_SECRET=tu_api_secret
 ```
 
-### Primer Registro (Administrador)
+## 🔒 Autenticación
 
-El certificado digital (archivo .p12) debe ser convertido a **base64** y enviado como una cadena de texto:
+El sistema usa dos esquemas de autenticación independientes:
 
-```bash
-# Convertir certificado .p12 a base64 (Linux/Mac)
-base64 -i certificado.p12 -o certificado_base64.txt
-
-# O en PowerShell (Windows)
-[Convert]::ToBase64String([IO.File]::ReadAllBytes("certificado.p12"))
-```
-
-Luego, enviar el registro con el certificado en base64:
+- **API de facturación** (`/api/v1/*`): API key por tenant. Envía la clave en el
+  header `X-API-Key` (o `Authorization: Bearer sk_live_...`). Las claves se
+  provisionan desde el backoffice de administración (no hay auto-registro).
+- **API de administración** (`/admin/api/*`): login con JWT para el personal
+  interno. Bootstrapea el primer usuario admin con `npm run create-admin`
+  (ver `scripts/create-admin.ts`), luego autentica con:
 
 ```bash
-POST /register
+POST /admin/api/auth/login
 {
   "email": "admin@miempresa.com",
-  "password": "password123",
-  "masterKey": "clave_maestra_super_secreta",
-  "ruc": "1234567890001",
-  "razon_social": "Mi Empresa S.A.",
-  "certificate": "MIIJqQIBAzCCCW8GCSqGSIb3DQEHAa...",  // Certificado .p12 en base64
-  "certificate_password": "password_del_certificado"
+  "password": "password123"
 }
-```
-
-## 🔒 Sistema de Seguridad
-
-El Sistema de Facturación Electrónica implementa un sistema de registro de múltiples capas:
-
-1. **Primer Registro**: Requiere `MASTER_REGISTRATION_KEY`
-2. **Registros Posteriores**: Códigos de invitación o RUCs en whitelist
-3. **Control Total**: Posibilidad de deshabilitar registros
-
-```env
-# Códigos de invitación
-INVITATION_CODES=INV2024001,INV2024002,DEMO2024
-
-# RUCs pre-aprobados
-ALLOWED_RUCS=1234567890001,0987654321001
-
-# Deshabilitar registro
-DISABLE_REGISTRATION=true
 ```
 
 ## 📚 Documentación API
@@ -173,9 +145,7 @@ Una vez ejecutando el servidor, accede a:
 
 ```bash
 # Autenticación
-POST /register          # Registro de usuario y empresa
-POST /auth             # Autenticación
-GET  /status           # Estado del sistema
+POST /admin/api/auth/login   # Login de administrador (backoffice)
 
 # Facturación
 POST /api/v1/invoice/complete    # Crear y procesar factura
@@ -233,7 +203,6 @@ heroku create tu-sistema-facturacion
 # Configurar variables
 heroku config:set MONGODB_URI=tu_mongodb_uri
 heroku config:set JWT_SECRET=tu_jwt_secret
-heroku config:set MASTER_REGISTRATION_KEY=tu_clave_maestra
 
 # Desplegar
 git push heroku main
