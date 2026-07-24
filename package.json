@@ -17,7 +17,8 @@
     "validate": "npm run typecheck && npm run lint && npm run test:ci",
     "format": "prettier --write \"src/**/*.ts\" \"__tests__/**/*.ts\"",
     "migrate:pdfs": "ts-node scripts/migrate-pdfs.ts",
-    "migrate:pdfs:dry-run": "DRY_RUN=true ts-node scripts/migrate-pdfs.ts"
+    "migrate:pdfs:dry-run": "DRY_RUN=true ts-node scripts/migrate-pdfs.ts",
+    "create-admin": "ts-node scripts/create-admin.ts"
   },
   "keywords": [
     "facturacion-electronica",
