@@ -1,5 +1,10 @@
 node_modules/
 dist/
+# Build output of tsconfig.scripts.json (scripts/create-admin.ts precompiled
+# for the Docker runtime image, see Dockerfile/DEPLOYMENT.md) — same
+# rationale as dist/ above, just a distinct exact directory name so the
+# unanchored `dist/` pattern doesn't already cover it.
+dist-scripts/
 .env
 .env.production
 .env.*.local
