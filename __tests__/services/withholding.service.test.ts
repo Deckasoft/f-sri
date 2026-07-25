@@ -24,6 +24,7 @@ jest.mock('../../src/services/storage', () => ({
 
 const invoiceServiceMocks = {
   buscarIssuingCompany: jest.fn(),
+  resolveEmpresaAutenticada: jest.fn(),
 };
 jest.mock('../../src/services/invoice.service', () => ({ InvoiceService: invoiceServiceMocks }));
 
@@ -67,10 +68,13 @@ jest.mock('../../src/models/WithholdingPDF', () => {
   return { __esModule: true, default: MockPDF };
 });
 
-const issuingCompanyStatics = { findOne: jest.fn() };
-jest.mock('../../src/models/IssuingCompany', () => ({
+// Sequence backs getNextSecuencial (src/utils/sequence.utils.ts): a single
+// atomic findOneAndUpdate($inc, upsert) instead of the old
+// read-highest-then-increment approach that used to query Withholding/IssuingCompany.
+const sequenceStatics = { findOneAndUpdate: jest.fn() };
+jest.mock('../../src/models/Sequence', () => ({
   __esModule: true,
-  default: { findOne: (...args: any[]) => issuingCompanyStatics.findOne(...args) },
+  default: { findOneAndUpdate: (...args: any[]) => sequenceStatics.findOneAndUpdate(...args) },
 }));
 
 import { WithholdingService } from '../../src/services/withholding.service';
@@ -148,14 +152,20 @@ const requestValido: WithholdingRequest = {
   ],
 };
 
+const COMPANY_ID = empresaMock._id;
+
 describe('WithholdingService', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
     jest.clearAllMocks();
     savedPDFs.length = 0;
     invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(empresaMock);
-    issuingCompanyStatics.findOne.mockResolvedValue(empresaMock);
-    withholdingStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
+    invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue(empresaMock);
+    let currentSecuencial = 0;
+    sequenceStatics.findOneAndUpdate.mockImplementation(async () => {
+      currentSecuencial += 1;
+      return { current: currentSecuencial };
+    });
   });
 
   describe('validarDatosRetencion', () => {
@@ -181,25 +191,34 @@ describe('WithholdingService', () => {
   });
 
   describe('generarSecuencial', () => {
-    it('increments the latest secuencial', async () => {
-      withholdingStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue({ secuencial: '000000099' }) });
+    it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
+      await expect(WithholdingService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
+      await expect(WithholdingService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
 
-      await expect(WithholdingService.generarSecuencial(empresaMock.ruc)).resolves.toBe('000000100');
-    });
-
-    it('throws when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue(null);
-
-      await expect(WithholdingService.generarSecuencial('999')).rejects.toThrow('not found');
+      expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
+        { empresa_emisora_id: COMPANY_ID, document_type: '07' },
+        { $inc: { current: 1 } },
+        { upsert: true, new: true },
+      );
     });
   });
 
   describe('procesarRetencionCompleta', () => {
     it('fails when the empresa is missing', async () => {
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(null);
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(new Error('Empresa emisora no encontrada'));
 
-      await expect(WithholdingService.procesarRetencionCompleta(requestValido)).rejects.toThrow(
+      await expect(WithholdingService.procesarRetencionCompleta(requestValido, COMPANY_ID)).rejects.toThrow(
         'Empresa emisora no encontrada',
+      );
+    });
+
+    it('fails when the body RUC does not match the authenticated tenant', async () => {
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(
+        new Error('El RUC del comprobante no coincide con la empresa autenticada'),
+      );
+
+      await expect(WithholdingService.procesarRetencionCompleta(requestValido, COMPANY_ID)).rejects.toThrow(
+        'El RUC del comprobante no coincide con la empresa autenticada',
       );
     });
 
@@ -209,16 +228,18 @@ describe('WithholdingService', () => {
         infoCompRetencion: { ...requestValido.infoCompRetencion, fechaEmision: 'mala' },
       };
 
-      await expect(WithholdingService.procesarRetencionCompleta(invalido)).rejects.toThrow('Invalid date format');
+      await expect(WithholdingService.procesarRetencionCompleta(invalido, COMPANY_ID)).rejects.toThrow(
+        'Invalid date format',
+      );
     });
   });
 
   describe('crearRetencionCompleta', () => {
     it('creates the withholding with an 07 access key and the computed total retenido', async () => {
       // Skip the real signing flow in the fire-and-forget background call.
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
-      const resultado = await WithholdingService.crearRetencionCompleta(requestValido);
+      const resultado = await WithholdingService.crearRetencionCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.retencion.clave_acceso).toHaveLength(49);
       expect(resultado.retencion.clave_acceso.substring(8, 10)).toBe('07');
@@ -229,9 +250,9 @@ describe('WithholdingService', () => {
 
     it('always emits the mandatory <parteRel> tag (default NO) before razonSocialSujetoRetenido', async () => {
       // Skip the real signing flow in the fire-and-forget background call.
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
-      const resultado = await WithholdingService.crearRetencionCompleta(requestValido);
+      const resultado = await WithholdingService.crearRetencionCompleta(requestValido, COMPANY_ID);
 
       // ATS 2.0.0 schema: {tipoSujetoRetenido?, parteRel} must precede razonSocialSujetoRetenido,
       // otherwise SRI rejects with error 35 (ARCHIVO NO CUMPLE ESTRUCTURA XML)
@@ -241,13 +262,13 @@ describe('WithholdingService', () => {
 
     it('respects an explicit parteRel value and emits tipoSujetoRetenido when provided', async () => {
       // Skip the real signing flow in the fire-and-forget background call.
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
       const request = JSON.parse(JSON.stringify(requestValido)) as WithholdingRequest;
       request.infoCompRetencion.parteRel = 'SI';
       request.infoCompRetencion.tipoSujetoRetenido = '01';
 
-      const resultado = await WithholdingService.crearRetencionCompleta(request);
+      const resultado = await WithholdingService.crearRetencionCompleta(request, COMPANY_ID);
 
       expect(resultado.xml).toContain('<parteRel>SI</parteRel>');
       expect(resultado.xml).toContain('<tipoSujetoRetenido>01</tipoSujetoRetenido>');
@@ -281,7 +302,12 @@ describe('WithholdingService', () => {
 
       await WithholdingService.procesarEnvioSRI(ret, empresaMock, requestValido);
 
-      expect(firmarXMLMock).toHaveBeenCalledWith('<comprobanteRetencion/>', '/tmp/cert.p12', 'test-cert-password', '07');
+      expect(firmarXMLMock).toHaveBeenCalledWith(
+        '<comprobanteRetencion/>',
+        '/tmp/cert.p12',
+        'test-cert-password',
+        '07',
+      );
       expect(ret.sri_estado).toBe('RECIBIDA');
       expect(generateWithholdingPDFMock).toHaveBeenCalled();
       expect(savedPDFs[0].estado).toBe('GENERADO');

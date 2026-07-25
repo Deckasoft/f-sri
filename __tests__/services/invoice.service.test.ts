@@ -92,19 +92,19 @@ jest.mock('../../src/models/IdentificationType', () => ({
   default: { findOne: (...args: any[]) => identificationTypeStatics.findOne(...args) },
 }));
 
-// Mimics a Mongoose Query: awaitable directly (generarSecuencial does
-// `await IssuingCompany.findOne(...)`) and chainable via .select() (used by
-// buscarIssuingCompany to pull in the select:false certificate fields).
+// Mimics a Mongoose Query: awaitable directly and chainable via .select()
+// (used by buscarIssuingCompany to pull in the select:false certificate
+// fields).
 function mockQuery(value: any) {
   const query: any = Promise.resolve(value);
   query.select = jest.fn().mockResolvedValue(value);
   return query;
 }
 
-const issuingCompanyStatics = { findOne: jest.fn() };
+const issuingCompanyStatics = { findById: jest.fn() };
 jest.mock('../../src/models/IssuingCompany', () => ({
   __esModule: true,
-  default: { findOne: (...args: any[]) => issuingCompanyStatics.findOne(...args) },
+  default: { findById: (...args: any[]) => issuingCompanyStatics.findById(...args) },
 }));
 
 const clientStatics = { findOne: jest.fn() };
@@ -117,6 +117,15 @@ const productStatics = { findOne: jest.fn() };
 jest.mock('../../src/models/Product', () => ({
   __esModule: true,
   default: { findOne: (...args: any[]) => productStatics.findOne(...args) },
+}));
+
+// Sequence backs getNextSecuencial (src/utils/sequence.utils.ts): a single
+// atomic findOneAndUpdate($inc, upsert) instead of the old
+// read-highest-then-increment approach.
+const sequenceStatics = { findOneAndUpdate: jest.fn() };
+jest.mock('../../src/models/Sequence', () => ({
+  __esModule: true,
+  default: { findOneAndUpdate: (...args: any[]) => sequenceStatics.findOneAndUpdate(...args) },
 }));
 
 import { InvoiceService } from '../../src/services/invoice.service';
@@ -202,6 +211,8 @@ afterAll(() => {
   if (fs.existsSync(p12Path)) fs.unlinkSync(p12Path);
 });
 
+const COMPANY_ID = 'empresa-1';
+
 describe('InvoiceService', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
@@ -210,10 +221,15 @@ describe('InvoiceService', () => {
     savedDetails.length = 0;
     savedPDFs.length = 0;
     identificationTypeStatics.findOne.mockResolvedValue({ codigo: '05' });
-    issuingCompanyStatics.findOne.mockReturnValue(mockQuery(empresaBase()));
+    issuingCompanyStatics.findById.mockReturnValue(mockQuery(empresaBase()));
     clientStatics.findOne.mockResolvedValue(clienteMock);
     productStatics.findOne.mockResolvedValue(productoMock);
     invoiceStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
+    let currentSecuencial = 0;
+    sequenceStatics.findOneAndUpdate.mockImplementation(async () => {
+      currentSecuencial += 1;
+      return { current: currentSecuencial };
+    });
   });
 
   describe('validarDatosFactura', () => {
@@ -224,27 +240,25 @@ describe('InvoiceService', () => {
   });
 
   describe('generarSecuencial', () => {
-    it('starts at 000000001 and increments existing sequences', async () => {
-      await expect(InvoiceService.generarSecuencial('1790012345001')).resolves.toBe('000000001');
+    it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
+      await expect(InvoiceService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
+      await expect(InvoiceService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
 
-      invoiceStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue({ secuencial: '000000007' }) });
-      await expect(InvoiceService.generarSecuencial('1790012345001')).resolves.toBe('000000008');
-    });
-
-    it('throws when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockReturnValue(mockQuery(null));
-
-      await expect(InvoiceService.generarSecuencial('999')).rejects.toThrow('not found');
+      expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
+        { empresa_emisora_id: COMPANY_ID, document_type: '01' },
+        { $inc: { current: 1 } },
+        { upsert: true, new: true },
+      );
     });
   });
 
   describe('buscarIssuingCompany', () => {
     it('returns the empresa without materializing any certificate file', async () => {
-      issuingCompanyStatics.findOne.mockReturnValue(
+      issuingCompanyStatics.findById.mockReturnValue(
         mockQuery({ ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD }),
       );
 
-      const empresa = await InvoiceService.buscarIssuingCompany('1790012345001');
+      const empresa = await InvoiceService.buscarIssuingCompany(COMPANY_ID);
 
       // buscarIssuingCompany only fetches the (encrypted) fields; it must no
       // longer write anything to disk. Materializing the P12 happens later,
@@ -253,22 +267,46 @@ describe('InvoiceService', () => {
       expect(empresa?.ruc).toBe('1790012345001');
       expect(empresa?.certificate).toBe(p12Base64);
       expect(empresa?.certificate_password).toBe(P12_PASSWORD);
-      expect(issuingCompanyStatics.findOne).toHaveBeenCalledWith({ ruc: '1790012345001' });
+      // Phase 3: resolved strictly by the authenticated tenant's companyId,
+      // never by a RUC taken from the request body.
+      expect(issuingCompanyStatics.findById).toHaveBeenCalledWith(COMPANY_ID);
     });
 
     it('selects the select:false certificate fields explicitly', async () => {
       const selectSpy = jest.fn().mockResolvedValue(empresaBase());
-      issuingCompanyStatics.findOne.mockReturnValue({ select: selectSpy });
+      issuingCompanyStatics.findById.mockReturnValue({ select: selectSpy });
 
-      await InvoiceService.buscarIssuingCompany('1790012345001');
+      await InvoiceService.buscarIssuingCompany(COMPANY_ID);
 
       expect(selectSpy).toHaveBeenCalledWith('+certificate +certificate_password');
     });
 
     it('returns null when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockReturnValue(mockQuery(null));
+      issuingCompanyStatics.findById.mockReturnValue(mockQuery(null));
 
       await expect(InvoiceService.buscarIssuingCompany('999')).resolves.toBeNull();
+    });
+  });
+
+  describe('resolveEmpresaAutenticada', () => {
+    it('returns the empresa when the body RUC matches the authenticated tenant', async () => {
+      const empresa = await InvoiceService.resolveEmpresaAutenticada('1790012345001', COMPANY_ID);
+
+      expect(empresa.ruc).toBe('1790012345001');
+    });
+
+    it('throws Empresa emisora no encontrada when the tenant does not exist', async () => {
+      issuingCompanyStatics.findById.mockReturnValue(mockQuery(null));
+
+      await expect(InvoiceService.resolveEmpresaAutenticada('1790012345001', 'missing')).rejects.toThrow(
+        'Empresa emisora no encontrada',
+      );
+    });
+
+    it('throws a RUC-mismatch error when the body RUC differs from the authenticated tenant', async () => {
+      await expect(InvoiceService.resolveEmpresaAutenticada('9999999999001', COMPANY_ID)).rejects.toThrow(
+        'El RUC del comprobante no coincide con la empresa autenticada',
+      );
     });
   });
 
@@ -276,7 +314,9 @@ describe('InvoiceService', () => {
     it('throws when a product is missing', async () => {
       productStatics.findOne.mockResolvedValue(null);
 
-      await expect(InvoiceService.buscarProducts(requestValido.detalles)).rejects.toThrow('Product not found: P001');
+      await expect(InvoiceService.buscarProducts(requestValido.detalles, COMPANY_ID)).rejects.toThrow(
+        'Product not found: P001',
+      );
     });
   });
 
@@ -287,24 +327,39 @@ describe('InvoiceService', () => {
         () => identificationTypeStatics.findOne.mockResolvedValue(null),
         'Identification type not found',
       ],
-      ['empresa', () => issuingCompanyStatics.findOne.mockReturnValue(mockQuery(null)), 'Empresa emisora no encontrada'],
+      [
+        'empresa',
+        () => issuingCompanyStatics.findById.mockReturnValue(mockQuery(null)),
+        'Empresa emisora no encontrada',
+      ],
       ['client', () => clientStatics.findOne.mockResolvedValue(null), 'Client not found'],
     ])('fails when the %s is missing', async (_n, arrange, mensaje) => {
       arrange();
 
-      await expect(InvoiceService.procesarFacturaCompleta(requestValido)).rejects.toThrow(mensaje);
+      await expect(InvoiceService.procesarFacturaCompleta(requestValido, COMPANY_ID)).rejects.toThrow(mensaje);
     });
 
     it('fails on invalid dates', async () => {
       const invalido = { ...requestValido, infoFactura: { ...requestValido.infoFactura, fechaEmision: 'mala' } };
 
-      await expect(InvoiceService.procesarFacturaCompleta(invalido)).rejects.toThrow('Invalid date format');
+      await expect(InvoiceService.procesarFacturaCompleta(invalido, COMPANY_ID)).rejects.toThrow('Invalid date format');
+    });
+
+    it('fails when the body RUC does not match the authenticated tenant', async () => {
+      const invalido = {
+        ...requestValido,
+        infoTributaria: { ...requestValido.infoTributaria, ruc: '9999999999001' },
+      };
+
+      await expect(InvoiceService.procesarFacturaCompleta(invalido, COMPANY_ID)).rejects.toThrow(
+        'El RUC del comprobante no coincide con la empresa autenticada',
+      );
     });
   });
 
   describe('crearFacturaCompleta', () => {
     it('creates the invoice with an 01 access key, XML, totals and details', async () => {
-      const resultado = await InvoiceService.crearFacturaCompleta(requestValido);
+      const resultado = await InvoiceService.crearFacturaCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.factura.clave_acceso).toHaveLength(49);
       expect(resultado.factura.clave_acceso.substring(8, 10)).toBe('01');

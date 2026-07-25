@@ -24,6 +24,7 @@ jest.mock('../../src/services/storage', () => ({
 
 const invoiceServiceMocks = {
   buscarIssuingCompany: jest.fn(),
+  resolveEmpresaAutenticada: jest.fn(),
 };
 jest.mock('../../src/services/invoice.service', () => ({ InvoiceService: invoiceServiceMocks }));
 
@@ -67,10 +68,13 @@ jest.mock('../../src/models/DeliveryNotePDF', () => {
   return { __esModule: true, default: MockPDF };
 });
 
-const issuingCompanyStatics = { findOne: jest.fn() };
-jest.mock('../../src/models/IssuingCompany', () => ({
+// Sequence backs getNextSecuencial (src/utils/sequence.utils.ts): a single
+// atomic findOneAndUpdate($inc, upsert) instead of the old
+// read-highest-then-increment approach that used to query DeliveryNote/IssuingCompany.
+const sequenceStatics = { findOneAndUpdate: jest.fn() };
+jest.mock('../../src/models/Sequence', () => ({
   __esModule: true,
-  default: { findOne: (...args: any[]) => issuingCompanyStatics.findOne(...args) },
+  default: { findOneAndUpdate: (...args: any[]) => sequenceStatics.findOneAndUpdate(...args) },
 }));
 
 import { DeliveryNoteService } from '../../src/services/delivery-note.service';
@@ -117,14 +121,20 @@ const requestValido: DeliveryNoteRequest = {
   ],
 };
 
+const COMPANY_ID = empresaMock._id;
+
 describe('DeliveryNoteService', () => {
   beforeEach(() => {
     jest.restoreAllMocks();
     jest.clearAllMocks();
     savedPDFs.length = 0;
     invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(empresaMock);
-    issuingCompanyStatics.findOne.mockResolvedValue(empresaMock);
-    deliveryNoteStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
+    invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue(empresaMock);
+    let currentSecuencial = 0;
+    sequenceStatics.findOneAndUpdate.mockImplementation(async () => {
+      currentSecuencial += 1;
+      return { current: currentSecuencial };
+    });
   });
 
   describe('validarDatosGuiaRemision', () => {
@@ -168,31 +178,40 @@ describe('DeliveryNoteService', () => {
 
     it('rejects an incomplete request through procesarGuiaRemisionCompleta', async () => {
       await expect(
-        DeliveryNoteService.procesarGuiaRemisionCompleta({ ...requestValido, destinatarios: [] }),
+        DeliveryNoteService.procesarGuiaRemisionCompleta({ ...requestValido, destinatarios: [] }, COMPANY_ID),
       ).rejects.toThrow('Datos de guía de remisión inválidos o incompletos');
     });
   });
 
   describe('generarSecuencial', () => {
-    it('increments the latest secuencial', async () => {
-      deliveryNoteStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue({ secuencial: '000000004' }) });
+    it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
+      await expect(DeliveryNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
+      await expect(DeliveryNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
 
-      await expect(DeliveryNoteService.generarSecuencial(empresaMock.ruc)).resolves.toBe('000000005');
-    });
-
-    it('throws when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue(null);
-
-      await expect(DeliveryNoteService.generarSecuencial('999')).rejects.toThrow('not found');
+      expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
+        { empresa_emisora_id: COMPANY_ID, document_type: '06' },
+        { $inc: { current: 1 } },
+        { upsert: true, new: true },
+      );
     });
   });
 
   describe('procesarGuiaRemisionCompleta', () => {
     it('fails when the empresa is missing', async () => {
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(null);
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(new Error('Empresa emisora no encontrada'));
 
-      await expect(DeliveryNoteService.procesarGuiaRemisionCompleta(requestValido)).rejects.toThrow(
+      await expect(DeliveryNoteService.procesarGuiaRemisionCompleta(requestValido, COMPANY_ID)).rejects.toThrow(
         'Empresa emisora no encontrada',
+      );
+    });
+
+    it('fails when the body RUC does not match the authenticated tenant', async () => {
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(
+        new Error('El RUC del comprobante no coincide con la empresa autenticada'),
+      );
+
+      await expect(DeliveryNoteService.procesarGuiaRemisionCompleta(requestValido, COMPANY_ID)).rejects.toThrow(
+        'El RUC del comprobante no coincide con la empresa autenticada',
       );
     });
 
@@ -202,16 +221,18 @@ describe('DeliveryNoteService', () => {
         infoGuiaRemision: { ...requestValido.infoGuiaRemision, fechaFinTransporte: 'mala' },
       };
 
-      await expect(DeliveryNoteService.procesarGuiaRemisionCompleta(invalido)).rejects.toThrow('Invalid date format');
+      await expect(DeliveryNoteService.procesarGuiaRemisionCompleta(invalido, COMPANY_ID)).rejects.toThrow(
+        'Invalid date format',
+      );
     });
   });
 
   describe('crearGuiaRemisionCompleta', () => {
     it('creates the delivery note with an 06 access key and transport data', async () => {
       // Skip the real signing flow in the fire-and-forget background call.
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue({ ...empresaMock, certificate: undefined });
 
-      const resultado = await DeliveryNoteService.crearGuiaRemisionCompleta(requestValido);
+      const resultado = await DeliveryNoteService.crearGuiaRemisionCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.guia_remision.clave_acceso).toHaveLength(49);
       expect(resultado.guia_remision.clave_acceso.substring(8, 10)).toBe('06');
@@ -223,7 +244,7 @@ describe('DeliveryNoteService', () => {
     it('does not fail the creation when the async SRI submission rejects', async () => {
       const envioSpy = jest.spyOn(DeliveryNoteService, 'procesarEnvioSRI').mockRejectedValue(new Error('sri caído'));
 
-      const resultado = await DeliveryNoteService.crearGuiaRemisionCompleta(requestValido);
+      const resultado = await DeliveryNoteService.crearGuiaRemisionCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.guia_remision.clave_acceso).toHaveLength(49);
       expect(envioSpy).toHaveBeenCalled();

@@ -12,17 +12,27 @@ const creditNoteStaticMocks = {
   findOne: jest.fn().mockResolvedValue(null),
   findByIdAndUpdate: jest.fn().mockResolvedValue(null),
   findByIdAndDelete: jest.fn().mockResolvedValue(null),
+  findOneAndUpdate: jest.fn().mockResolvedValue(null),
+  findOneAndDelete: jest.fn().mockResolvedValue(null),
 };
 
+const savedCreditNotes: any[] = [];
 jest.mock('../src/models/CreditNote', () => {
   class MockCreditNote {
-    constructor(public data: any) {}
+    [key: string]: any;
+    constructor(data: any) {
+      Object.assign(this, data);
+      this._id = 'cn-1';
+      savedCreditNotes.push(this);
+    }
     save = creditNoteInstanceMocks.save;
     static find = (...args: any[]) => creditNoteStaticMocks.find(...args);
     static findById = (...args: any[]) => creditNoteStaticMocks.findById(...args);
     static findOne = (...args: any[]) => creditNoteStaticMocks.findOne(...args);
     static findByIdAndUpdate = (...args: any[]) => creditNoteStaticMocks.findByIdAndUpdate(...args);
     static findByIdAndDelete = (...args: any[]) => creditNoteStaticMocks.findByIdAndDelete(...args);
+    static findOneAndUpdate = (...args: any[]) => creditNoteStaticMocks.findOneAndUpdate(...args);
+    static findOneAndDelete = (...args: any[]) => creditNoteStaticMocks.findOneAndDelete(...args);
   }
   return { __esModule: true, default: MockCreditNote };
 });
@@ -126,7 +136,21 @@ describe('Credit note routes', () => {
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
       expect(res.body.xml).toBe('<notaCredito/>');
-      expect(crearNotaCreditoCompletaMock).toHaveBeenCalledWith(notaCreditoPayload);
+      expect(crearNotaCreditoCompletaMock).toHaveBeenCalledWith(notaCreditoPayload, 'company-1');
+    });
+
+    it('returns 400 when the body RUC does not match the authenticated tenant', async () => {
+      crearNotaCreditoCompletaMock.mockRejectedValueOnce(
+        new Error('El RUC del comprobante no coincide con la empresa autenticada'),
+      );
+
+      const res = await request(app)
+        .post('/api/v1/credit-note/complete')
+        .set('X-API-Key', authHeader)
+        .send({ nota_credito: notaCreditoPayload });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('no coincide');
     });
 
     it('returns 400 for validation errors from the service', async () => {
@@ -155,31 +179,37 @@ describe('Credit note routes', () => {
   });
 
   describe('CRUD endpoints', () => {
-    it('lists credit notes', async () => {
+    it('lists only the tenant’s own credit notes', async () => {
       creditNoteStaticMocks.find.mockResolvedValueOnce([{ secuencial: '000000001' }]);
 
       const res = await request(app).get('/api/v1/credit-note').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(1);
+      expect(creditNoteStaticMocks.find).toHaveBeenCalledWith({ empresa_emisora_id: 'company-1' });
     });
 
-    it('returns 404 for a missing credit note', async () => {
+    it('returns 404 for a missing/cross-tenant credit note', async () => {
       const res = await request(app).get('/api/v1/credit-note/507f1f77bcf86cd799439011').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(404);
     });
 
-    it('returns a credit note by id', async () => {
-      creditNoteStaticMocks.findById.mockResolvedValueOnce({ secuencial: '000000001' });
+    it('returns a credit note by id scoped to the tenant', async () => {
+      creditNoteStaticMocks.findOne.mockResolvedValueOnce({ secuencial: '000000001' });
 
       const res = await request(app).get('/api/v1/credit-note/507f1f77bcf86cd799439011').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body.secuencial).toBe('000000001');
+      expect(creditNoteStaticMocks.findOne).toHaveBeenCalledWith({
+        _id: '507f1f77bcf86cd799439011',
+        empresa_emisora_id: 'company-1',
+      });
     });
 
-    it('returns the PDF info of a credit note', async () => {
+    it('returns the PDF info of a credit note that belongs to the tenant', async () => {
+      creditNoteStaticMocks.findOne.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
       creditNotePDFStaticMocks.findOne.mockResolvedValueOnce({ pdf_url: 'https://cdn/pdf.pdf', estado: 'GENERADO' });
 
       const res = await request(app)
@@ -190,7 +220,18 @@ describe('Credit note routes', () => {
       expect(res.body.pdf_url).toBe('https://cdn/pdf.pdf');
     });
 
+    it('404s the PDF lookup when the credit note belongs to another tenant', async () => {
+      const res = await request(app)
+        .get('/api/v1/credit-note/507f1f77bcf86cd799439011/pdf')
+        .set('X-API-Key', authHeader);
+
+      expect(res.status).toBe(404);
+      expect(creditNotePDFStaticMocks.findOne).not.toHaveBeenCalled();
+    });
+
     it('returns 404 when the credit note has no PDF yet', async () => {
+      creditNoteStaticMocks.findOne.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
+
       const res = await request(app)
         .get('/api/v1/credit-note/507f1f77bcf86cd799439011/pdf')
         .set('X-API-Key', authHeader);
@@ -198,8 +239,8 @@ describe('Credit note routes', () => {
       expect(res.status).toBe(404);
     });
 
-    it('deletes a credit note', async () => {
-      creditNoteStaticMocks.findByIdAndDelete.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
+    it('deletes a credit note scoped to the tenant', async () => {
+      creditNoteStaticMocks.findOneAndDelete.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
 
       const res = await request(app)
         .delete('/api/v1/credit-note/507f1f77bcf86cd799439011')
@@ -207,6 +248,10 @@ describe('Credit note routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.message).toBe('Deleted');
+      expect(creditNoteStaticMocks.findOneAndDelete).toHaveBeenCalledWith({
+        _id: '507f1f77bcf86cd799439011',
+        empresa_emisora_id: 'company-1',
+      });
     });
   });
 });

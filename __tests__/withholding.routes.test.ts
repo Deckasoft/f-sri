@@ -12,17 +12,27 @@ const withholdingStaticMocks = {
   findOne: jest.fn().mockResolvedValue(null),
   findByIdAndUpdate: jest.fn().mockResolvedValue(null),
   findByIdAndDelete: jest.fn().mockResolvedValue(null),
+  findOneAndUpdate: jest.fn().mockResolvedValue(null),
+  findOneAndDelete: jest.fn().mockResolvedValue(null),
 };
 
+const savedWithholdings: any[] = [];
 jest.mock('../src/models/Withholding', () => {
   class MockWithholding {
-    constructor(public data: any) {}
+    [key: string]: any;
+    constructor(data: any) {
+      Object.assign(this, data);
+      this._id = 'ret-1';
+      savedWithholdings.push(this);
+    }
     save = withholdingInstanceMocks.save;
     static find = (...args: any[]) => withholdingStaticMocks.find(...args);
     static findById = (...args: any[]) => withholdingStaticMocks.findById(...args);
     static findOne = (...args: any[]) => withholdingStaticMocks.findOne(...args);
     static findByIdAndUpdate = (...args: any[]) => withholdingStaticMocks.findByIdAndUpdate(...args);
     static findByIdAndDelete = (...args: any[]) => withholdingStaticMocks.findByIdAndDelete(...args);
+    static findOneAndUpdate = (...args: any[]) => withholdingStaticMocks.findOneAndUpdate(...args);
+    static findOneAndDelete = (...args: any[]) => withholdingStaticMocks.findOneAndDelete(...args);
   }
   return { __esModule: true, default: MockWithholding };
 });
@@ -121,7 +131,21 @@ describe('Withholding routes', () => {
       expect(res.status).toBe(201);
       expect(res.body.success).toBe(true);
       expect(res.body.xml).toBe('<comprobanteRetencion/>');
-      expect(crearRetencionCompletaMock).toHaveBeenCalledWith(retencionPayload);
+      expect(crearRetencionCompletaMock).toHaveBeenCalledWith(retencionPayload, 'company-1');
+    });
+
+    it('returns 400 when the body RUC does not match the authenticated tenant', async () => {
+      crearRetencionCompletaMock.mockRejectedValueOnce(
+        new Error('El RUC del comprobante no coincide con la empresa autenticada'),
+      );
+
+      const res = await request(app)
+        .post('/api/v1/withholding/complete')
+        .set('X-API-Key', authHeader)
+        .send({ retencion: retencionPayload });
+
+      expect(res.status).toBe(400);
+      expect(res.body.message).toContain('no coincide');
     });
 
     it('returns 400 for validation errors from the service', async () => {
@@ -152,23 +176,24 @@ describe('Withholding routes', () => {
   });
 
   describe('CRUD endpoints', () => {
-    it('lists withholdings', async () => {
+    it('lists only the tenant’s own withholdings', async () => {
       withholdingStaticMocks.find.mockResolvedValueOnce([{ secuencial: '000000001' }]);
 
       const res = await request(app).get('/api/v1/withholding').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(200);
       expect(res.body).toHaveLength(1);
+      expect(withholdingStaticMocks.find).toHaveBeenCalledWith({ empresa_emisora_id: 'company-1' });
     });
 
-    it('returns 404 for a missing withholding', async () => {
+    it('returns 404 for a missing/cross-tenant withholding', async () => {
       const res = await request(app).get('/api/v1/withholding/507f1f77bcf86cd799439011').set('X-API-Key', authHeader);
 
       expect(res.status).toBe(404);
     });
 
-    it('returns a withholding by id', async () => {
-      withholdingStaticMocks.findById.mockResolvedValueOnce({ secuencial: '000000001' });
+    it('returns a withholding by id scoped to the tenant', async () => {
+      withholdingStaticMocks.findOne.mockResolvedValueOnce({ secuencial: '000000001' });
 
       const res = await request(app).get('/api/v1/withholding/507f1f77bcf86cd799439011').set('X-API-Key', authHeader);
 
@@ -176,7 +201,8 @@ describe('Withholding routes', () => {
       expect(res.body.secuencial).toBe('000000001');
     });
 
-    it('returns the PDF info of a withholding', async () => {
+    it('returns the PDF info of a withholding that belongs to the tenant', async () => {
+      withholdingStaticMocks.findOne.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
       withholdingPDFStaticMocks.findOne.mockResolvedValueOnce({ pdf_url: 'https://cdn/pdf.pdf', estado: 'GENERADO' });
 
       const res = await request(app)
@@ -187,8 +213,17 @@ describe('Withholding routes', () => {
       expect(res.body.pdf_url).toBe('https://cdn/pdf.pdf');
     });
 
-    it('deletes a withholding', async () => {
-      withholdingStaticMocks.findByIdAndDelete.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
+    it('404s the PDF lookup when the withholding belongs to another tenant', async () => {
+      const res = await request(app)
+        .get('/api/v1/withholding/507f1f77bcf86cd799439011/pdf')
+        .set('X-API-Key', authHeader);
+
+      expect(res.status).toBe(404);
+      expect(withholdingPDFStaticMocks.findOne).not.toHaveBeenCalled();
+    });
+
+    it('deletes a withholding scoped to the tenant', async () => {
+      withholdingStaticMocks.findOneAndDelete.mockResolvedValueOnce({ _id: '507f1f77bcf86cd799439011' });
 
       const res = await request(app)
         .delete('/api/v1/withholding/507f1f77bcf86cd799439011')
@@ -196,6 +231,10 @@ describe('Withholding routes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.message).toBe('Deleted');
+      expect(withholdingStaticMocks.findOneAndDelete).toHaveBeenCalledWith({
+        _id: '507f1f77bcf86cd799439011',
+        empresa_emisora_id: 'company-1',
+      });
     });
   });
 });

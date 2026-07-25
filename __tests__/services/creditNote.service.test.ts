@@ -29,6 +29,7 @@ jest.mock('../../src/services/storage', () => ({
 const invoiceServiceMocks = {
   buscarTipoIdentificacion: jest.fn(),
   buscarIssuingCompany: jest.fn(),
+  resolveEmpresaAutenticada: jest.fn(),
   buscarClient: jest.fn(),
   buscarProduct: jest.fn(),
 };
@@ -103,10 +104,13 @@ jest.mock('../../src/models/Invoice', () => ({
   default: { findOne: (...args: any[]) => invoiceStatics.findOne(...args) },
 }));
 
-const issuingCompanyStatics = { findOne: jest.fn() };
-jest.mock('../../src/models/IssuingCompany', () => ({
+// Sequence backs getNextSecuencial (src/utils/sequence.utils.ts): a single
+// atomic findOneAndUpdate($inc, upsert) instead of the old
+// read-highest-then-increment approach that used to query CreditNote/IssuingCompany.
+const sequenceStatics = { findOneAndUpdate: jest.fn() };
+jest.mock('../../src/models/Sequence', () => ({
   __esModule: true,
-  default: { findOne: (...args: any[]) => issuingCompanyStatics.findOne(...args) },
+  default: { findOneAndUpdate: (...args: any[]) => sequenceStatics.findOneAndUpdate(...args) },
 }));
 
 import { CreditNoteService } from '../../src/services/credit-note.service';
@@ -162,13 +166,19 @@ const requestValido: CreditNoteRequest = {
   ],
 };
 
+const COMPANY_ID = empresaMock._id;
+
 function prepararLookupsFelices() {
   invoiceServiceMocks.buscarTipoIdentificacion.mockResolvedValue({ codigo: '05' });
   invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(empresaMock);
+  invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue(empresaMock);
   invoiceServiceMocks.buscarClient.mockResolvedValue(clienteMock);
   invoiceServiceMocks.buscarProduct.mockResolvedValue(productoMock);
-  issuingCompanyStatics.findOne.mockResolvedValue(empresaMock);
-  creditNoteStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
+  let currentSecuencial = 0;
+  sequenceStatics.findOneAndUpdate.mockImplementation(async () => {
+    currentSecuencial += 1;
+    return { current: currentSecuencial };
+  });
 }
 
 describe('CreditNoteService', () => {
@@ -198,20 +208,15 @@ describe('CreditNoteService', () => {
   });
 
   describe('generarSecuencial', () => {
-    it('starts at 000000001 when there are no credit notes', async () => {
-      await expect(CreditNoteService.generarSecuencial(empresaMock.ruc)).resolves.toBe('000000001');
-    });
+    it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
+      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
+      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
 
-    it('increments the latest secuencial', async () => {
-      creditNoteStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue({ secuencial: '000000041' }) });
-
-      await expect(CreditNoteService.generarSecuencial(empresaMock.ruc)).resolves.toBe('000000042');
-    });
-
-    it('throws when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue(null);
-
-      await expect(CreditNoteService.generarSecuencial('999')).rejects.toThrow('not found');
+      expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
+        { empresa_emisora_id: COMPANY_ID, document_type: '04' },
+        { $inc: { current: 1 } },
+        { upsert: true, new: true },
+      );
     });
   });
 
@@ -224,15 +229,24 @@ describe('CreditNoteService', () => {
       ],
       [
         'empresa',
-        () => invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(null),
+        () =>
+          invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(new Error('Empresa emisora no encontrada')),
         'Empresa emisora no encontrada',
+      ],
+      [
+        'RUC mismatch',
+        () =>
+          invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(
+            new Error('El RUC del comprobante no coincide con la empresa autenticada'),
+          ),
+        'El RUC del comprobante no coincide con la empresa autenticada',
       ],
       ['client', () => invoiceServiceMocks.buscarClient.mockResolvedValue(null), 'Client not found'],
       ['product', () => invoiceServiceMocks.buscarProduct.mockResolvedValue(null), 'Product not found'],
     ])('fails when the %s is missing', async (_name, arrange, mensaje) => {
       arrange();
 
-      await expect(CreditNoteService.procesarNotaCreditoCompleta(requestValido)).rejects.toThrow(mensaje);
+      await expect(CreditNoteService.procesarNotaCreditoCompleta(requestValido, COMPANY_ID)).rejects.toThrow(mensaje);
     });
 
     it('fails on invalid dates', async () => {
@@ -241,13 +255,15 @@ describe('CreditNoteService', () => {
         infoNotaCredito: { ...requestValido.infoNotaCredito, fechaEmision: 'fecha-mala' },
       };
 
-      await expect(CreditNoteService.procesarNotaCreditoCompleta(invalido)).rejects.toThrow('Invalid date format');
+      await expect(CreditNoteService.procesarNotaCreditoCompleta(invalido, COMPANY_ID)).rejects.toThrow(
+        'Invalid date format',
+      );
     });
 
     it('resolves every entity and links the modified invoice when it exists', async () => {
       invoiceStatics.findOne.mockResolvedValue({ _id: 'factura-99' });
 
-      const resultado = await CreditNoteService.procesarNotaCreditoCompleta(requestValido);
+      const resultado = await CreditNoteService.procesarNotaCreditoCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.empresa).toBe(empresaMock);
       expect(resultado.cliente).toBe(clienteMock);
@@ -261,11 +277,11 @@ describe('CreditNoteService', () => {
     beforeEach(() => {
       // Skip the real signing flow in the fire-and-forget background call by
       // resolving an empresa without a certificate configured.
-      invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue({ ...empresaMock, certificate: undefined });
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue({ ...empresaMock, certificate: undefined });
     });
 
     it('creates the credit note with an 04 access key, XML and details', async () => {
-      const resultado = await CreditNoteService.crearNotaCreditoCompleta(requestValido);
+      const resultado = await CreditNoteService.crearNotaCreditoCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.nota_credito.clave_acceso).toHaveLength(49);
       expect(resultado.nota_credito.clave_acceso.substring(8, 10)).toBe('04');
