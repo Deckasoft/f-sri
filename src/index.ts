@@ -165,5 +165,15 @@ mongoose
     });
   })
   .catch((err) => {
+    // Fail loudly and exit rather than leaving the process alive-but-deaf:
+    // without this, an unreachable MONGO_URI (e.g. the VPS's IP not yet
+    // allowlisted in MongoDB Atlas — the single most likely first-deploy
+    // mistake) would leave the process running with app.listen() never
+    // called, so it never binds the port and never crashes. That silently
+    // defeats `restart: always` in compose.prod.yml (nothing crashes, so
+    // nothing restarts) and looks from the outside like a Caddy/upstream
+    // problem rather than a database one. Exiting lets the container
+    // orchestrator's restart policy actually retry the connection.
     console.error('❌ Database connection error', err);
+    process.exit(1);
   });
