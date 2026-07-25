@@ -5,6 +5,11 @@
     "outDir": "dist",
     "strict": true,
     "esModuleInterop": true,
+    // La declaración de tipos de `resend` referencia react (React.ReactElement)
+    // como soporte opcional para plantillas JSX, aun cuando no se instale react
+    // como dependencia. No usamos ese modo (enviamos html/text planos), así que
+    // sin skipLibCheck tsc falla al resolver ese tipo dentro de node_modules.
+    "skipLibCheck": true,
     "types": ["jest", "node"]
   },
   "exclude": ["node_modules", "dist"]

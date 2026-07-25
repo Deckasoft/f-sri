@@ -127,6 +127,11 @@ export class CloudinaryPDFStorage implements IPDFStorageProvider {
 
   /**
    * Obtiene la URL optimizada de un PDF en Cloudinary
+   *
+   * No forma parte de IPDFStorageProvider (ese contrato solo expone
+   * getDownloadUrl, async, para poder soportar URLs presignadas en S3). Se
+   * conserva como método propio de esta clase por compatibilidad con el uso
+   * existente y las pruebas directas sobre CloudinaryPDFStorage.
    */
   getPublicUrl(publicId: string): string {
     return cloudinary.url(publicId, {
@@ -134,6 +139,29 @@ export class CloudinaryPDFStorage implements IPDFStorageProvider {
       format: 'pdf',
       secure: true,
     });
+  }
+
+  /**
+   * Obtiene una URL de descarga para el PDF. En Cloudinary esto es
+   * simplemente la URL pública — no hay nada que presignar ni que expire.
+   */
+  async getDownloadUrl(publicId: string): Promise<string> {
+    return this.getPublicUrl(publicId);
+  }
+
+  /**
+   * Descarga los bytes del PDF desde Cloudinary (a través de su URL pública)
+   */
+  async getFileBuffer(publicId: string): Promise<Buffer> {
+    const url = this.getPublicUrl(publicId);
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      throw new Error(`Error descargando PDF de Cloudinary (${response.status}): ${url}`);
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    return Buffer.from(arrayBuffer);
   }
 
   /**

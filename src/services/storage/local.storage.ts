@@ -97,10 +97,37 @@ export class LocalPDFStorage implements IPDFStorageProvider {
 
   /**
    * Obtiene la URL pública de un PDF
+   *
+   * No forma parte de IPDFStorageProvider (ese contrato solo expone
+   * getDownloadUrl, async, para poder soportar URLs presignadas en S3). Se
+   * conserva como método propio de esta clase por compatibilidad con el uso
+   * existente y las pruebas directas sobre LocalPDFStorage.
    */
   getPublicUrl(publicId: string): string {
     const sanitizedId = this.sanitizeFilename(publicId);
     return `${this.baseUrl}/${sanitizedId}.pdf`;
+  }
+
+  /**
+   * Obtiene una URL de descarga para el PDF. En almacenamiento local esto es
+   * simplemente la URL pública — no hay nada que presignar ni que expire.
+   */
+  async getDownloadUrl(publicId: string): Promise<string> {
+    return this.getPublicUrl(publicId);
+  }
+
+  /**
+   * Lee los bytes del PDF almacenado localmente
+   */
+  async getFileBuffer(publicId: string): Promise<Buffer> {
+    const sanitizedId = this.sanitizeFilename(publicId);
+    const filePath = path.join(this.storagePath, `${sanitizedId}.pdf`);
+
+    try {
+      return fs.readFileSync(filePath);
+    } catch (error) {
+      throw new Error(`Error leyendo PDF local: ${(error as Error).message}`);
+    }
   }
 
   /**
