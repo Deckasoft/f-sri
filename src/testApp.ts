@@ -3,6 +3,8 @@ import helmet from 'helmet';
 import { loadEnv } from './config/env.config';
 import { generalLimiter } from './config/rateLimit.config';
 import adminAuthRoutes from './routes/admin/auth';
+import adminRoutes from './routes/admin';
+import onboardingRoutes from './routes/onboarding';
 import identificationTypeRoutes from './routes/identificationType';
 import issuingCompanyRoutes from './routes/issuingCompany';
 import clientRoutes from './routes/client';
@@ -37,7 +39,9 @@ export const createApp = () => {
   app.use('/api/v1/withholding', withholdingRoutes);
   app.use('/api/v1/invoice-detail', invoiceDetailRoutes);
   app.use('/api/v1/invoice-pdf', invoicePDFRoutes);
+  app.use('/onboarding/api', onboardingRoutes);
   app.use('/admin/api/auth', adminAuthRoutes);
   app.use('/admin/api', adminAuth);
+  app.use('/admin/api', adminRoutes);
   return app;
 };

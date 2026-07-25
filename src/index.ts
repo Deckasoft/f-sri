@@ -18,6 +18,8 @@ import { generalLimiter } from './config/rateLimit.config';
 import swaggerSpec from './swagger';
 import corsTestRoutes from './routes/cors-test';
 import adminAuthRoutes from './routes/admin/auth';
+import adminRoutes from './routes/admin';
+import onboardingRoutes from './routes/onboarding';
 import identificationTypeRoutes from './routes/identificationType';
 import issuingCompanyRoutes from './routes/issuingCompany';
 import clientRoutes from './routes/client';
@@ -113,12 +115,16 @@ app.use('/api/v1/withholding', withholdingRoutes);
 app.use('/api/v1/invoice-detail', invoiceDetailRoutes);
 app.use('/api/v1/invoice-pdf', invoicePDFRoutes);
 
+// Public, unauthenticated onboarding flow (invite redemption). Rate-limited
+// internally (authLimiter) since it's another public, auth-adjacent surface,
+// same category as the admin login route below.
+app.use('/onboarding/api', onboardingRoutes);
+
 // Admin backoffice API (Phase 4 builds on this). Login is public; the
 // adminAuth guard registered below it protects everything mounted after.
 app.use('/admin/api/auth', adminAuthRoutes);
 app.use('/admin/api', adminAuth);
-// Phase 4: additional admin routers mount here, e.g.
-// app.use('/admin/api/companies', companiesRoutes);
+app.use('/admin/api', adminRoutes);
 
 // Error handling middleware (debe ir al final)
 app.use(corsErrorHandler);
