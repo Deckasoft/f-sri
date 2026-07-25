@@ -9,7 +9,7 @@ module.exports = {
     '!src/index.ts',
     '!src/swagger.ts',
     '!src/config/**',
-    '!src/middleware/corsErrorHandler.ts'
+    '!src/middleware/corsErrorHandler.ts',
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],
@@ -18,12 +18,12 @@ module.exports = {
       branches: 70,
       functions: 90,
       lines: 85,
-      statements: 85
-    }
+      statements: 85,
+    },
   },
   setupFilesAfterEnv: ['<rootDir>/__tests__/setup.ts'],
   verbose: true,
   bail: 1,
   forceExit: true,
-  detectOpenHandles: true
+  detectOpenHandles: true,
 };
