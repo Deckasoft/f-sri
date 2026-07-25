@@ -131,6 +131,178 @@ curl -s -X POST "$BASE_URL/admin/api/tenants/$TENANT_ID/api-keys" \
 }
 ```
 
+## 🗂️ Gestión de Tenants, API Keys e Invitaciones (backoffice, JWT admin)
+
+Operaciones adicionales de administración sobre un tenant ya creado — listar,
+consultar, actualizar su perfil y, sobre todo, **activarlo/desactivarlo**.
+
+### Listar todos los tenants
+
+```bash
+curl -s -X GET "$BASE_URL/admin/api/tenants" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+Devuelve el array completo de documentos `IssuingCompany` (sin proyección —
+`certificate`/`certificate_password` siguen ocultos porque el esquema los
+marca `select: false` por defecto, no por nada específico de esta ruta).
+
+### Obtener un tenant por id
+
+```bash
+curl -s -X GET "$BASE_URL/admin/api/tenants/$TENANT_ID" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+### Actualizar el perfil de un tenant
+
+Mismos campos que el autoservicio (`razon_social`, `nombre_comercial`,
+`direccion`, `tipo_ambiente`, etc. — ver `src/routes/admin/tenant.ts`), pero
+aquí puede hacerlo un admin sobre **cualquier** tenant por `:id`. `ruc`,
+`active`, `certificate`/`certificate_password` y `onboarded_at` no forman
+parte de este esquema.
+
+```bash
+curl -s -X PUT "$BASE_URL/admin/api/tenants/$TENANT_ID" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"telefono": "0999888777", "email": "facturacion@empresaejemplo.com"}' | jq
+```
+
+### ⚠️ Activar / desactivar un tenant (`active`)
+
+Este es el interruptor operativamente más importante del backoffice: cuando
+`active` pasa a `false`, **todas** las API keys de ese tenant dejan de
+funcionar de inmediato en `/api/v1/*` (`apiKeyAuth` rechaza la petición si la
+empresa asociada tiene `active: false` — ver `SECURITY.md`), sin tener que
+revocar cada clave una por una. Es el mecanismo real para "suspender" o
+"dar de baja" un cliente.
+
+```bash
+curl -s -X PUT "$BASE_URL/admin/api/tenants/$TENANT_ID/active" \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -d '{"active": false}' | jq
+```
+
+**Respuesta esperada** (documento `IssuingCompany` actualizado):
+```json
+{
+  "_id": "64f8a1b2c3d4e5f6a7b8c9d1",
+  "ruc": "1234567890001",
+  "razon_social": "Empresa Ejemplo S.A.",
+  "active": false,
+  "...": "..."
+}
+```
+
+Reactivar es la misma llamada con `{"active": true}`.
+
+### Listar las API keys de un tenant
+
+```bash
+curl -s -X GET "$BASE_URL/admin/api/tenants/$TENANT_ID/api-keys" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+**Respuesta esperada** (nunca incluye `key_hash`, solo el `prefix` para
+mostrar en UI — el token completo ya no es recuperable después de su
+creación):
+```json
+[
+  {
+    "_id": "64f8a1b2c3d4e5f6a7b8c9f0",
+    "empresa_emisora_id": "64f8a1b2c3d4e5f6a7b8c9d1",
+    "name": "Integración interna",
+    "prefix": "sk_live_a1b2",
+    "revoked_at": null,
+    "last_used_at": "2026-07-20T09:00:00.000Z",
+    "createdAt": "2026-07-01T10:30:00.000Z"
+  }
+]
+```
+
+### Revocar una API key
+
+Soft-delete: marca `revoked_at`, no borra el documento. Una clave revocada
+es rechazada de inmediato por `apiKeyAuth` en `/api/v1/*`.
+
+```bash
+curl -s -X DELETE "$BASE_URL/admin/api/tenants/$TENANT_ID/api-keys/64f8a1b2c3d4e5f6a7b8c9f0" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+### Listar las invitaciones de un tenant
+
+```bash
+curl -s -X GET "$BASE_URL/admin/api/tenants/$TENANT_ID/invites" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+**Respuesta esperada** (incluye `token_hash` — el hash SHA-256, nunca el
+token en texto plano, que solo se muestra una vez al crear la invitación):
+```json
+[
+  {
+    "_id": "64f8a1b2c3d4e5f6a7b8c9e0",
+    "empresa_emisora_id": "64f8a1b2c3d4e5f6a7b8c9d1",
+    "token_hash": "a1b2c3...",
+    "expires_at": "2026-08-01T00:00:00.000Z",
+    "used_at": null,
+    "createdAt": "2026-07-24T10:00:00.000Z"
+  }
+]
+```
+
+### Eliminar una invitación (revocar antes de que se use)
+
+```bash
+curl -s -X DELETE "$BASE_URL/admin/api/tenants/$TENANT_ID/invites/64f8a1b2c3d4e5f6a7b8c9e0" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+## 📊 Métricas de Uso / Metering (backoffice, JWT admin)
+
+Conteo de comprobantes emitidos por tenant, agrupado por tipo de documento y
+estado SRI — la base para facturar a cada tenant según su consumo. Ambos
+endpoints aceptan `from`/`to` opcionales (fechas ISO) para acotar el rango;
+sin ellos, cuentan todo el histórico.
+
+### Uso de un tenant específico
+
+```bash
+curl -s -X GET "$BASE_URL/admin/api/tenants/$TENANT_ID/usage" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+
+# Acotado a un rango de fechas
+curl -s -X GET "$BASE_URL/admin/api/tenants/$TENANT_ID/usage?from=2026-07-01&to=2026-07-31" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+**Respuesta esperada** (una fila por combinación `document_type`/`sri_estado`):
+```json
+[
+  { "document_type": "invoice", "sri_estado": "RECIBIDA", "count": 128 },
+  { "document_type": "invoice", "sri_estado": "DEVUELTA", "count": 3 },
+  { "document_type": "credit_note", "sri_estado": "RECIBIDA", "count": 12 }
+]
+```
+
+### Resumen global (todos los tenants, para comparar consumo)
+
+```bash
+curl -s -X GET "$BASE_URL/admin/api/usage/summary" \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | jq
+```
+
+**Respuesta esperada** (ordenado de mayor a menor consumo):
+```json
+[
+  { "empresa_emisora_id": "64f8a1b2c3d4e5f6a7b8c9d1", "total": 143 },
+  { "empresa_emisora_id": "64f8a1b2c3d4e5f6a7b8c9d9", "total": 27 }
+]
+```
+
 ## 2️⃣ Onboarding (público) — el cliente redime su invitación
 
 Estos dos endpoints son públicos: no requieren API key ni JWT (el propio

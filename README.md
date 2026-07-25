@@ -179,9 +179,14 @@ este README, [SECURITY.md](SECURITY.md) y [CURL_EXAMPLES.md](CURL_EXAMPLES.md).
 
 ```bash
 # Administración (backoffice, JWT admin)
-POST /admin/api/auth/login              # Login de administrador
-POST /admin/api/tenants                 # Crear tenant
-POST /admin/api/tenants/{id}/invites    # Generar invitación de onboarding
+POST /admin/api/auth/login                # Login de administrador
+GET  /admin/api/tenants                   # Listar tenants
+POST /admin/api/tenants                   # Crear tenant
+PUT  /admin/api/tenants/{id}/active       # Activar/desactivar un tenant (corta el acceso de todas sus API keys)
+POST /admin/api/tenants/{id}/invites      # Generar invitación de onboarding
+POST /admin/api/tenants/{id}/api-keys     # Emitir una API key para un tenant
+GET  /admin/api/tenants/{id}/usage        # Conteo de uso (metering) de un tenant
+GET  /admin/api/usage/summary             # Resumen de uso de todos los tenants
 
 # Onboarding (público, sin autenticación previa)
 GET  /onboarding/api/invite/{token}     # Previsualizar una invitación
@@ -253,15 +258,13 @@ primer admin dentro del contenedor, y el flujo de actualización).
 
 ## 🤝 Contribuir
 
-¡Las contribuciones son bienvenidas! Por favor lee [CONTRIBUTING.md](CONTRIBUTING.md) para detalles.
+Este es un repositorio **privado**: no hay un flujo de fork público ni Pull
+Requests externos. El proceso es interno al equipo:
 
-### Proceso de Contribución
-
-1. Fork el proyecto
-2. Crea una rama para tu feature (`git checkout -b feature/AmazingFeature`)
-3. Commit tus cambios (`git commit -m 'Add some AmazingFeature'`)
-4. Push a la rama (`git push origin feature/AmazingFeature`)
-5. Abre un Pull Request
+1. Crea una rama para tu feature/fix (`git checkout -b feature/nombre-descriptivo`)
+2. Commit tus cambios siguiendo los estándares de código (ver [CONTRIBUTING.md](CONTRIBUTING.md) para convenciones de commits y estilo)
+3. Push a la rama y abre un Pull Request dentro de este repositorio
+4. Verifica que `npm run validate` pase antes de pedir revisión
 
 ## 📋 Roadmap
 

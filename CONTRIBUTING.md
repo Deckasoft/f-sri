@@ -20,7 +20,7 @@ F Sri es un proyecto de código abierto y valoramos todas las contribuciones de 
 
 ### Prerrequisitos
 
-- Node.js 18.x o 20.x
+- Node.js 20.x+ (Node 18 es EOL; `package.json` declara `engines.node >= 20.0.0` y CI ya solo corre en 20.x)
 - MongoDB 4.4+
 - Git
 

@@ -620,9 +620,9 @@ export default {
     '/api/v1/invoice-pdf/download/{claveAcceso}': {
       get: {
         tags: ['PDF Management'],
-        summary: 'Descargar el PDF (redirección a la URL pública)',
+        summary: 'Descargar el PDF (redirección a la URL de descarga)',
         description:
-          'Redirige (302) a la URL pública del PDF en el proveedor de almacenamiento configurado (Cloudinary, local, etc.).',
+          'Redirige (302) a la URL de descarga del PDF en el proveedor de almacenamiento configurado (S3 mediante una URL presignada de corta duración por defecto; Cloudinary/local como alternativas).',
         parameters: [
           {
             name: 'claveAcceso',
