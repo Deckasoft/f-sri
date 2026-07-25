@@ -22,14 +22,37 @@ const getAllowedOrigins = (): string[] => {
           'http://127.0.0.1:8080',
         ];
 
-  // Agregar orígenes desde variable de entorno si existe
-  const envOrigins = process.env.ALLOWED_ORIGINS;
-  if (envOrigins) {
-    const additionalOrigins = envOrigins.split(',').map((origin) => origin.trim());
-    return [...defaultOrigins, ...additionalOrigins];
+  // El propio origen de la app, derivado de PUBLIC_URL. SIEMPRE permitido, en
+  // cualquier entorno: la SPA de backoffice (/admin) y la de onboarding se
+  // sirven desde este mismo origen (src/staticSpa.ts), así que una petición
+  // que llega con este Origin es same-origin por construcción, no una
+  // petición cross-origin — permitirla no amplía la superficie.
+  //
+  // Es obligatorio, no una comodidad: Vite marca los tags que genera con el
+  // atributo `crossorigin` (<script type="module" crossorigin>, <link
+  // rel="stylesheet" crossorigin>), y ese atributo hace que el navegador
+  // mande cabecera Origin INCLUSO en peticiones same-origin. Sin esta
+  // entrada, el navegador recibe 403 al pedir /admin/assets/*.css y *.js y
+  // el backoffice queda en pantalla en blanco. Los métodos no-simples
+  // (POST/PUT/DELETE contra /admin/api/*) también mandan Origin, así que
+  // afecta a toda la SPA, no solo a sus assets.
+  const publicUrl = process.env.PUBLIC_URL;
+  const ownOrigins: string[] = [];
+  if (publicUrl) {
+    try {
+      ownOrigins.push(new URL(publicUrl).origin);
+    } catch {
+      // loadEnv() ya valida que PUBLIC_URL sea una URL válida y aborta el
+      // arranque si no lo es; este catch solo evita romper en contextos que
+      // importan este módulo sin haber pasado por loadEnv() (p. ej. tests).
+    }
   }
 
-  return defaultOrigins;
+  // Agregar orígenes desde variable de entorno si existe
+  const envOrigins = process.env.ALLOWED_ORIGINS;
+  const additionalOrigins = envOrigins ? envOrigins.split(',').map((origin) => origin.trim()) : [];
+
+  return [...new Set([...defaultOrigins, ...ownOrigins, ...additionalOrigins])];
 };
 
 const allowedOrigins = getAllowedOrigins();
