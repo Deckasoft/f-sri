@@ -166,11 +166,21 @@ jobs:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
 
+    - name: Compute lowercase image name
+      # GHCR/Docker registry paths must be all-lowercase. `github.repository`
+      # preserves the repo's actual case (Deckasoft/f-sri), which would
+      # otherwise get passed straight through as an invalid, uppercase image
+      # reference — computed explicitly here rather than assumed, since
+      # compose.prod.yml's default GHCR_IMAGE must match whatever this job
+      # actually publishes.
+      id: image
+      run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
     - name: Extract image metadata
       id: meta
       uses: docker/metadata-action@v5
       with:
-        images: ghcr.io/${{ github.repository }}
+        images: ${{ steps.image.outputs.name }}
         tags: |
           type=raw,value=latest
           type=sha,format=long
