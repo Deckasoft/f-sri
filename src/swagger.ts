@@ -148,18 +148,9 @@ export default {
       get: {
         tags: ['Identification Type Management'],
         summary: 'List IdentificationType',
+        description:
+          'Global, read-only SRI catalog shared by every tenant. There is no create/update/delete endpoint on the public /api/v1 surface — catalog maintenance is an admin-only concern, not a per-tenant one.',
         responses: { '200': { description: 'OK' } },
-      },
-      post: {
-        tags: ['Identification Type Management'],
-        summary: 'Create TipoIdentificacion',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': { schema: { $ref: '#/components/schemas/TipoIdentificacionPayload' } },
-          },
-        },
-        responses: { '201': { description: 'Created' } },
       },
     },
     '/api/v1/identification-type/{id}': {
@@ -167,58 +158,65 @@ export default {
         tags: ['Identification Type Management'],
         summary: 'Get TipoIdentificacion by id',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'OK' } },
-      },
-      put: {
-        tags: ['Identification Type Management'],
-        summary: 'Update TipoIdentificacion',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': { schema: { $ref: '#/components/schemas/TipoIdentificacionPayload' } },
-          },
-        },
-        responses: { '200': { description: 'Updated' } },
-      },
-      delete: {
-        tags: ['Identification Type Management'],
-        summary: 'Delete TipoIdentificacion',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'Deleted' } },
+        responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } },
       },
     },
     '/api/v1/issuing-company': {
       get: {
         tags: ['Issuing Company Management'],
-        summary: 'List IssuingCompany',
-        responses: { '200': { description: 'OK' } },
-      },
-    },
-    '/api/v1/issuing-company/{id}': {
-      get: {
-        tags: ['Issuing Company Management'],
-        summary: 'Get EmpresaEmisora',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'OK' } },
+        summary: "Get the authenticated tenant's own company",
+        description:
+          'Tenant self-service: always resolves to the caller’s own IssuingCompany via the authenticated API key—there is no :id param and no way to look up another tenant’s company. certificate/certificate_password are never included in the response.',
+        responses: {
+          '200': {
+            description: 'OK',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/EmpresaEmisora' } } },
+          },
+          '401': { description: 'API key missing or invalid' },
+          '404': { description: "The authenticated tenant's company no longer exists" },
+        },
       },
       put: {
         tags: ['Issuing Company Management'],
-        summary: 'Update EmpresaEmisora',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        summary: "Update the authenticated tenant's own company profile",
+        description:
+          'Updates only the authenticated tenant’s own record, restricted to an explicit field whitelist. ruc, active, certificate, certificate_password and _id can never be changed through this endpoint—ruc is immutable tenant identity, active cannot be self-toggled, and certificate fields are only ever set via PUT /api/v1/issuing-company/certificate.',
         requestBody: {
           required: true,
           content: {
-            'application/json': { schema: { $ref: '#/components/schemas/EmpresaEmisoraPayload' } },
+            'application/json': { schema: { $ref: '#/components/schemas/IssuingCompanySelfServiceUpdatePayload' } },
           },
         },
-        responses: { '200': { description: 'Updated' } },
+        responses: {
+          '200': {
+            description: 'Updated',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/EmpresaEmisora' } } },
+          },
+          '401': { description: 'API key missing or invalid' },
+          '404': { description: "The authenticated tenant's company no longer exists" },
+        },
       },
-      delete: {
+    },
+    '/api/v1/issuing-company/certificate': {
+      put: {
         tags: ['Issuing Company Management'],
-        summary: 'Delete EmpresaEmisora',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'Deleted' } },
+        summary: "Upload/replace the authenticated tenant's P12 digital certificate",
+        description:
+          'Verifies the incoming P12 (base64) actually opens with the given password (see src/utils/certificate.utils.ts#verifyP12Password) before encrypting and storing both the certificate and its password on the authenticated tenant’s own company. Nothing is stored if the P12 does not open.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/CertificateUploadPayload' } },
+          },
+        },
+        responses: {
+          '200': { description: 'Certificate updated' },
+          '400': {
+            description: 'certificate/certificate_password missing, or the P12 does not open with the given password',
+          },
+          '401': { description: 'API key missing or invalid' },
+          '404': { description: "The authenticated tenant's company no longer exists" },
+        },
       },
     },
     '/api/v1/client': {
@@ -1475,23 +1473,34 @@ export default {
         },
         required: ['email', 'password'],
       },
-      TipoIdentificacionPayload: {
+      IssuingCompanySelfServiceUpdatePayload: {
         type: 'object',
+        description:
+          'Whitelisted fields a tenant may update about its own company profile (src/routes/issuingCompany.ts#UPDATABLE_FIELDS). Any other field in the body, including ruc, active, certificate, certificate_password or _id, is silently ignored.',
         properties: {
-          codigo: { type: 'string', example: '01' },
-          descripcion: { type: 'string', example: 'RUC' },
-        },
-        required: ['codigo', 'descripcion'],
-      },
-      EmpresaEmisoraPayload: {
-        type: 'object',
-        properties: {
-          ruc: { type: 'string', example: '0123456789001' },
           razon_social: { type: 'string', example: 'Mi Empresa S.A.' },
           nombre_comercial: { type: 'string', example: 'Mi Tienda' },
-          // Add more fields according to your IssuingCompany model
+          direccion: { type: 'string' },
+          direccion_matriz: { type: 'string' },
+          direccion_establecimiento: { type: 'string' },
+          telefono: { type: 'string' },
+          email: { type: 'string' },
+          email_notificacion: { type: 'string' },
+          codigo_establecimiento: { type: 'string', example: '001' },
+          punto_emision: { type: 'string', example: '001' },
+          tipo_ambiente: { type: 'number', example: 1 },
+          tipo_emision: { type: 'number', example: 1 },
+          obligado_contabilidad: { type: 'boolean' },
+          contribuyente_especial: { type: 'string' },
         },
-        required: ['ruc', 'razon_social'],
+      },
+      CertificateUploadPayload: {
+        type: 'object',
+        properties: {
+          certificate: { type: 'string', description: 'P12 digital certificate, base64-encoded' },
+          certificate_password: { type: 'string' },
+        },
+        required: ['certificate', 'certificate_password'],
       },
       ClientePayload: {
         type: 'object',
