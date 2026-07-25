@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { clearAllScheduledAuthorizationChecks } from '../src/utils/scheduledCheck.utils';
+import { flushAllBackgroundWork } from '../src/utils/backgroundWork.utils';
 
 // Global test setup
 jest.setTimeout(30000);
@@ -56,7 +57,17 @@ afterAll(() => {
 });
 
 // Global test cleanup
-afterEach(() => {
+afterEach(async () => {
+  // Wait for any fire-and-forget async work a test's request may have
+  // kicked off — procesarEnvioSRI's own chain (all 5 document services) and
+  // apiKeyAuth's touchLastUsed — to settle, before resetting mocks below.
+  // See src/utils/backgroundWork.utils.ts: none of this is awaited by its
+  // real caller (by design), so without this a test can end while that work
+  // is still running, which then keeps calling mocks that the NEXT,
+  // unrelated test's beforeEach has already reconfigured — corrupting that
+  // test's call counts/arguments instead of its own.
+  await flushAllBackgroundWork();
+
   // Cancel any real setTimeout a test's exercise of
   // programarConsultaAutorizacion (invoice/credit-note/debit-note/
   // delivery-note/withholding services) may have left pending — see

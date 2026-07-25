@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import Withholding from '../models/Withholding';
 import WithholdingPDF from '../models/WithholdingPDF';
@@ -130,9 +131,11 @@ export class WithholdingService {
       sriEstado: 'PENDIENTE',
     });
 
-    this.procesarEnvioSRI(retencion, empresa, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
-    });
+    trackBackgroundWork(
+      this.procesarEnvioSRI(retencion, empresa, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     return {
       retencion,

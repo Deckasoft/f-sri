@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import ApiKey from '../models/ApiKey';
 import { hashApiKey } from '../utils/apiKey.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 
 const API_KEY_HEADER = 'x-api-key';
 const BEARER_PREFIX = 'Bearer ';
@@ -46,9 +47,11 @@ const touchLastUsed = (apiKeyId: string, lastUsedAt?: Date): void => {
     return;
   }
 
-  ApiKey.findByIdAndUpdate(apiKeyId, { last_used_at: new Date() }).catch((err: unknown) => {
-    console.error('No se pudo actualizar last_used_at de la API key', err);
-  });
+  trackBackgroundWork(
+    ApiKey.findByIdAndUpdate(apiKeyId, { last_used_at: new Date() }).catch((err: unknown) => {
+      console.error('No se pudo actualizar last_used_at de la API key', err);
+    }),
+  );
 };
 
 /**

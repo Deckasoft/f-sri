@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import CreditNote from '../models/CreditNote';
 import CreditNoteDetail from '../models/CreditNoteDetail';
@@ -165,9 +166,11 @@ export class CreditNoteService {
       sriEstado: 'PENDIENTE',
     });
 
-    this.procesarEnvioSRI(notaCredito, empresa, cliente, productos, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
-    });
+    trackBackgroundWork(
+      this.procesarEnvioSRI(notaCredito, empresa, cliente, productos, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     const detallesGuardados = await this.crearDetallesNotaCredito(notaCredito._id, datos.detalles, productos);
 

@@ -8,6 +8,7 @@ import { PDFStorageFactory } from './storage';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import Invoice from '../models/Invoice';
 import InvoiceDetail from '../models/InvoiceDetail';
@@ -265,9 +266,11 @@ export class InvoiceService {
       sriEstado: 'PENDIENTE',
     });
 
-    this.procesarEnvioSRI(facturaCreada, empresa, cliente, productos, datosFactura).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
-    });
+    trackBackgroundWork(
+      this.procesarEnvioSRI(facturaCreada, empresa, cliente, productos, datosFactura).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     const detallesGuardados = await this.crearDetallesInvoice(facturaCreada._id, datosFactura.detalles, productos);
 

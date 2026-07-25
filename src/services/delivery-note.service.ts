@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import DeliveryNote from '../models/DeliveryNote';
 import DeliveryNotePDF from '../models/DeliveryNotePDF';
@@ -124,9 +125,11 @@ export class DeliveryNoteService {
       sriEstado: 'PENDIENTE',
     });
 
-    this.procesarEnvioSRI(guiaRemision, empresa, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
-    });
+    trackBackgroundWork(
+      this.procesarEnvioSRI(guiaRemision, empresa, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     return {
       guia_remision: guiaRemision,

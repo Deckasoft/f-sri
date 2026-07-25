@@ -25,6 +25,13 @@ export interface RecordEmissionParams {
  * it's saved. Call once per document, per document service.
  */
 export const recordEmission = (params: RecordEmissionParams): void => {
+  // Deliberately NOT tracked via trackBackgroundWork/flushAllBackgroundWork
+  // (src/utils/backgroundWork.utils.ts): most callers of the 5 document
+  // services in tests don't mock the UsageEvent model, so this hits a real
+  // (never-connected, in a unit test) Mongoose model — awaiting it in the
+  // global afterEach would block on Mongoose's connection-buffering wait
+  // (potentially for the rest of the test's whole timeout) instead of
+  // resolving quickly, the way the tracked call sites do.
   UsageEvent.create({
     empresa_emisora_id: params.empresaEmisoraId,
     document_type: params.documentType,
@@ -42,6 +49,7 @@ export const recordEmission = (params: RecordEmissionParams): void => {
  * which UsageEvent indexes and which is unique per document.
  */
 export const recordSriOutcome = (claveAcceso: string, estado: string): void => {
+  // See the comment on recordEmission above — deliberately not tracked.
   UsageEvent.findOneAndUpdate({ clave_acceso: claveAcceso }, { sri_estado: estado }).catch((err: unknown) => {
     console.error('No se pudo actualizar el evento de uso (recordSriOutcome)', err);
   });
