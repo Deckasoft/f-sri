@@ -6,4 +6,8 @@ coverage/
 .DS_Store
 .vscode/settings.json
 .nyc_output/
-storage/
+# Anchored to repo root: this is the local-disk PDF storage dir created at
+# runtime by LocalPDFStorage (see src/services/storage/local.storage.ts),
+# not src/services/storage/ (the storage *provider* source code) — an
+# unanchored `storage/` here would gitignore that whole source directory too.
+/storage/
