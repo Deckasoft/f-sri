@@ -208,17 +208,15 @@ heroku config:set JWT_SECRET=tu_jwt_secret
 git push heroku main
 ```
 
-### Docker
+### Docker + VPS (Hostinger) + MongoDB Atlas
 
-```dockerfile
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY dist ./dist
-EXPOSE 3000
-CMD ["npm", "start"]
-```
+El repo incluye un `Dockerfile` multi-stage real (API + SPA de administración,
+con las dependencias de Chromium que necesita Puppeteer) y un
+`compose.prod.yml` (API + Caddy como reverse proxy con TLS automático, sin
+contenedor de Mongo — la base de datos vive en MongoDB Atlas). Ver
+[`DEPLOYMENT.md`](DEPLOYMENT.md) para el procedimiento completo (variables de
+entorno requeridas, allowlisting de la IP del VPS en Atlas, `npm run
+create-admin` dentro del contenedor, y el flujo de actualización).
 
 ## 🤝 Contribuir
 
