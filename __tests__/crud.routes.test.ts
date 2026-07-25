@@ -144,6 +144,29 @@ jest.mock('../src/services/delivery-note.service', () => ({
 }));
 jest.mock('../src/services/withholding.service', () => ({ WithholdingService: { crearRetencionCompleta: jest.fn() } }));
 
+// invoicePDF.ts's download endpoint resolves a fresh download URL from the
+// configured storage provider (presigned for S3) instead of redirecting to a
+// stored static URL — mocked here so the route test doesn't depend on a real
+// provider/AWS SDK.
+const storageMock = {
+  getDownloadUrl: jest.fn().mockResolvedValue('https://s3.example.com/presigned-url'),
+  getFileBuffer: jest.fn(),
+  getProviderName: jest.fn().mockReturnValue('local'),
+};
+jest.mock('../src/services/storage', () => ({
+  __esModule: true,
+  PDFStorageFactory: { create: () => storageMock },
+}));
+
+// Email sending itself (Resend + attachment fetching) is unit-tested in
+// email.utils.test.ts — here we only verify the route wires the result into
+// email_estado/email_intentos/email_ultimo_error correctly.
+const sendInvoiceEmailMock = jest.fn();
+jest.mock('../src/utils/email.utils', () => ({
+  __esModule: true,
+  sendInvoiceEmail: (...args: any[]) => sendInvoiceEmailMock(...args),
+}));
+
 // Loaded after the mock definitions so the hoisted jest.mock factories
 // can reference the model mocks when the routes import them
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -650,23 +673,30 @@ describe('InvoicePDF routes (scoped via parent Invoice lookup)', () => {
     expect(res.status).toBe(404);
   });
 
-  it('redirects to the public PDF URL on download when the invoice belongs to the tenant', async () => {
-    invoicePDFMock.statics.findOne.mockResolvedValueOnce({ pdf_url: 'https://cdn/f.pdf', factura_id: ID });
+  it('redirects to a freshly-resolved download URL when the invoice belongs to the tenant', async () => {
+    invoicePDFMock.statics.findOne.mockResolvedValueOnce({
+      pdf_url: 'pdfs/1791234567001/1234567890',
+      pdf_public_id: 'pdfs/1791234567001/1234567890',
+      factura_id: ID,
+    });
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
+    storageMock.getDownloadUrl.mockResolvedValueOnce('https://s3.example.com/presigned-url');
 
     const res = await request(app).get(`/api/v1/invoice-pdf/download/${CLAVE}`).set('X-API-Key', authHeader);
 
     expect(res.status).toBe(302);
-    expect(res.headers.location).toBe('https://cdn/f.pdf');
+    expect(res.headers.location).toBe('https://s3.example.com/presigned-url');
+    expect(storageMock.getDownloadUrl).toHaveBeenCalledWith('pdfs/1791234567001/1234567890');
   });
 
-  it('returns 404 on download when the PDF has no URL', async () => {
-    invoicePDFMock.statics.findOne.mockResolvedValueOnce({ pdf_url: '', factura_id: ID });
+  it('returns 404 on download when the PDF has no stored key', async () => {
+    invoicePDFMock.statics.findOne.mockResolvedValueOnce({ pdf_url: '', pdf_public_id: '', factura_id: ID });
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
 
     const res = await request(app).get(`/api/v1/invoice-pdf/download/${CLAVE}`).set('X-API-Key', authHeader);
 
     expect(res.status).toBe(404);
+    expect(storageMock.getDownloadUrl).not.toHaveBeenCalled();
   });
 
   it('404s regeneration for an invoice belonging to another tenant', async () => {
@@ -684,29 +714,62 @@ describe('InvoicePDF routes (scoped via parent Invoice lookup)', () => {
     expect(res.body.facturaId).toBe(ID);
   });
 
-  it('queues an email send and reports email status for the tenant’s own invoice', async () => {
-    const doc: any = { email_estado: 'NO_ENVIADO', factura_id: ID, save: jest.fn().mockResolvedValue({}) };
+  it('sends the email and reports email status for the tenant’s own invoice', async () => {
+    const doc: any = {
+      email_estado: 'NO_ENVIADO',
+      email_intentos: 0,
+      factura_id: ID,
+      save: jest.fn().mockResolvedValue({}),
+    };
     invoicePDFMock.statics.findOne.mockResolvedValueOnce(doc);
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
+    sendInvoiceEmailMock.mockResolvedValueOnce({ success: true, messageId: 'resend-msg-1' });
+
     let res = await request(app)
       .post(`/api/v1/invoice-pdf/send-email/${CLAVE}`)
       .set('X-API-Key', authHeader)
       .send({ email_destinatario: 'cliente@test.com' });
     expect(res.status).toBe(200);
-    expect(doc.email_estado).toBe('PENDIENTE');
+    expect(doc.email_estado).toBe('ENVIADO');
+    expect(doc.email_intentos).toBe(1);
+    expect(doc.email_destinatario).toBe('cliente@test.com');
+    expect(sendInvoiceEmailMock).toHaveBeenCalledWith(doc, 'cliente@test.com', 'Cliente', 'Empresa');
 
     res = await request(app).post(`/api/v1/invoice-pdf/send-email/${CLAVE}`).set('X-API-Key', authHeader).send({});
     expect(res.status).toBe(400);
 
     invoicePDFMock.statics.findOne.mockResolvedValueOnce({
-      email_estado: 'PENDIENTE',
+      email_estado: 'ENVIADO',
       email_intentos: 1,
       factura_id: ID,
     });
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
     res = await request(app).get(`/api/v1/invoice-pdf/email-status/${CLAVE}`).set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
-    expect(res.body.email_estado).toBe('PENDIENTE');
+    expect(res.body.email_estado).toBe('ENVIADO');
+  });
+
+  it('marks the email as ERROR and records the failure when sending fails', async () => {
+    const doc: any = {
+      email_estado: 'NO_ENVIADO',
+      email_intentos: 0,
+      factura_id: ID,
+      save: jest.fn().mockResolvedValue({}),
+    };
+    invoicePDFMock.statics.findOne.mockResolvedValueOnce(doc);
+    invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
+    sendInvoiceEmailMock.mockResolvedValueOnce({ success: false, error: 'Resend rejected the request' });
+
+    const res = await request(app)
+      .post(`/api/v1/invoice-pdf/send-email/${CLAVE}`)
+      .set('X-API-Key', authHeader)
+      .send({ email_destinatario: 'cliente@test.com' });
+
+    expect(res.status).toBe(200);
+    expect(doc.email_estado).toBe('ERROR');
+    expect(doc.email_intentos).toBe(1);
+    expect(doc.email_ultimo_error).toBe('Resend rejected the request');
+    expect(res.body.error).toBe('Resend rejected the request');
   });
 
   it('404s email-status and send-email for another tenant’s invoice', async () => {
@@ -723,17 +786,37 @@ describe('InvoicePDF routes (scoped via parent Invoice lookup)', () => {
   });
 
   it('handles email retries and the already-sent case for the tenant’s own invoice', async () => {
-    const doc: any = { email_estado: 'ERROR', factura_id: ID, save: jest.fn().mockResolvedValue({}) };
+    const doc: any = {
+      email_estado: 'ERROR',
+      email_intentos: 1,
+      email_destinatario: 'cliente@test.com',
+      factura_id: ID,
+      save: jest.fn().mockResolvedValue({}),
+    };
     invoicePDFMock.statics.findOne.mockResolvedValueOnce(doc);
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
+    sendInvoiceEmailMock.mockResolvedValueOnce({ success: true, messageId: 'resend-msg-2' });
+
     let res = await request(app).post(`/api/v1/invoice-pdf/retry-email/${CLAVE}`).set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
-    expect(doc.email_estado).toBe('PENDIENTE');
+    expect(doc.email_estado).toBe('ENVIADO');
+    expect(doc.email_intentos).toBe(2);
+    expect(sendInvoiceEmailMock).toHaveBeenCalledWith(doc, 'cliente@test.com', 'Cliente', 'Empresa');
 
     invoicePDFMock.statics.findOne.mockResolvedValueOnce({ email_estado: 'ENVIADO', factura_id: ID });
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
     res = await request(app).post(`/api/v1/invoice-pdf/retry-email/${CLAVE}`).set('X-API-Key', authHeader);
     expect(res.status).toBe(400);
+  });
+
+  it('400s a retry when there is no recipient email on file', async () => {
+    invoicePDFMock.statics.findOne.mockResolvedValueOnce({ email_estado: 'ERROR', factura_id: ID });
+    invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
+
+    const res = await request(app).post(`/api/v1/invoice-pdf/retry-email/${CLAVE}`).set('X-API-Key', authHeader);
+
+    expect(res.status).toBe(400);
+    expect(sendInvoiceEmailMock).not.toHaveBeenCalled();
   });
 
   it('returns 404 when the PDF does not exist on the secondary endpoints', async () => {

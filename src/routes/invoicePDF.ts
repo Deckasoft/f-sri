@@ -1,7 +1,11 @@
 import { Router } from 'express';
 import InvoicePDF from '../models/InvoicePDF';
 import Invoice from '../models/Invoice';
+import Client from '../models/Client';
+import IssuingCompany from '../models/IssuingCompany';
 import { getTenantCompanyId } from '../utils/tenant.utils';
+import { sendInvoiceEmail } from '../utils/email.utils';
+import { PDFStorageFactory } from '../services/storage';
 
 const router = Router();
 
@@ -57,7 +61,10 @@ router.get('/access-key/:claveAcceso', async (req, res) => {
 });
 
 // Download PDF file
-// Redirige a la URL pública del PDF (Cloudinary, local storage, etc.)
+// Redirige a una URL de descarga fresca resuelta desde el almacenamiento
+// configurado. Con S3 (bucket privado) doc.pdf_url/pdf_public_id es una
+// clave de objeto, no una URL pública, así que aquí se genera una URL
+// presignada de corta duración en el momento — nunca se persiste.
 router.get('/download/:claveAcceso', async (req, res) => {
   try {
     const companyId = getTenantCompanyId(req);
@@ -67,12 +74,13 @@ router.get('/download/:claveAcceso', async (req, res) => {
     const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
     if (!factura) return res.status(404).json({ message: 'PDF not found' });
 
-    if (doc.pdf_url) {
-      // Redirigir a la URL pública del PDF
-      res.redirect(doc.pdf_url);
-    } else {
-      res.status(404).json({ message: 'PDF URL not available' });
+    if (!doc.pdf_url || !doc.pdf_public_id) {
+      return res.status(404).json({ message: 'PDF URL not available' });
     }
+
+    const storage = PDFStorageFactory.create();
+    const downloadUrl = await storage.getDownloadUrl(doc.pdf_public_id);
+    res.redirect(downloadUrl);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }
@@ -93,6 +101,24 @@ router.post('/regenerate/:facturaId', async (req, res) => {
   }
 });
 
+// Resolves the client/company names used in the email template/body for a
+// given invoice. Best-effort: a missing related record falls back to a
+// generic label rather than failing the whole send.
+const resolveEmailNames = async (factura: {
+  cliente_id: unknown;
+  empresa_emisora_id: unknown;
+}): Promise<{ clientName: string; companyName: string }> => {
+  const [cliente, empresa] = await Promise.all([
+    Client.findById(factura.cliente_id),
+    IssuingCompany.findById(factura.empresa_emisora_id),
+  ]);
+
+  return {
+    clientName: cliente?.razon_social ?? 'Cliente',
+    companyName: empresa?.razon_social ?? 'Empresa',
+  };
+};
+
 // Send PDF via email
 router.post('/send-email/:claveAcceso', async (req, res) => {
   try {
@@ -109,21 +135,29 @@ router.post('/send-email/:claveAcceso', async (req, res) => {
     const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
     if (!factura) return res.status(404).json({ message: 'PDF not found' });
 
-    // Update email fields for future implementation
-    doc.email_estado = 'PENDIENTE';
     doc.email_destinatario = email_destinatario;
-    doc.email_intentos = 0;
-    doc.email_ultimo_error = undefined;
-    // doc.email_enviado_por = req.user?.id; // When auth is implemented
+
+    const { clientName, companyName } = await resolveEmailNames(factura);
+    const result = await sendInvoiceEmail(doc, email_destinatario, clientName, companyName);
+
+    doc.email_intentos = (doc.email_intentos ?? 0) + 1;
+    if (result.success) {
+      doc.email_estado = 'ENVIADO';
+      doc.email_fecha_envio = new Date();
+      doc.email_ultimo_error = undefined;
+    } else {
+      doc.email_estado = 'ERROR';
+      doc.email_ultimo_error = result.error;
+    }
 
     await doc.save();
 
-    // TODO: Implement actual email sending logic here
     res.json({
-      message: 'Email sending request queued',
+      message: result.success ? 'Email sent successfully' : 'Email sending failed',
       claveAcceso: req.params.claveAcceso,
       destinatario: email_destinatario,
-      estado: 'PENDIENTE',
+      estado: doc.email_estado,
+      ...(result.success ? {} : { error: result.error }),
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -167,17 +201,30 @@ router.post('/retry-email/:claveAcceso', async (req, res) => {
       return res.status(400).json({ message: 'Email already sent successfully' });
     }
 
-    // Reset for retry
-    doc.email_estado = 'PENDIENTE';
-    doc.email_ultimo_error = undefined;
+    if (!doc.email_destinatario) {
+      return res.status(400).json({ message: 'No recipient email on file for this document' });
+    }
+
+    const { clientName, companyName } = await resolveEmailNames(factura);
+    const result = await sendInvoiceEmail(doc, doc.email_destinatario, clientName, companyName);
+
+    doc.email_intentos = (doc.email_intentos ?? 0) + 1;
+    if (result.success) {
+      doc.email_estado = 'ENVIADO';
+      doc.email_fecha_envio = new Date();
+      doc.email_ultimo_error = undefined;
+    } else {
+      doc.email_estado = 'ERROR';
+      doc.email_ultimo_error = result.error;
+    }
 
     await doc.save();
 
-    // TODO: Implement actual email retry logic here
     res.json({
-      message: 'Email retry requested',
+      message: result.success ? 'Email sent successfully' : 'Email sending failed',
       claveAcceso: req.params.claveAcceso,
-      estado: 'PENDIENTE',
+      estado: doc.email_estado,
+      ...(result.success ? {} : { error: result.error }),
     });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
