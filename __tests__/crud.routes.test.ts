@@ -415,6 +415,25 @@ describe('InvoiceDetail routes (scoped via parent Invoice lookup)', () => {
     expect(res.status).toBe(404);
   });
 
+  // factura_id is this model's tenant-linking field (InvoiceDetail carries no
+  // empresa_emisora_id of its own), so it must be stripped from the PUT body
+  // exactly like empresa_emisora_id is on every other tenant-scoped route —
+  // otherwise a tenant could reparent its own detail line onto another
+  // tenant's invoice just by naming that invoice's id in the update body.
+  it('strips a spoofed factura_id out of the PUT body, preventing a cross-tenant reparent', async () => {
+    invoiceDetailMock.statics.findById.mockResolvedValueOnce({ _id: ID, factura_id: 'factura-1' });
+    invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: 'factura-1' });
+    invoiceDetailMock.statics.findByIdAndUpdate.mockResolvedValueOnce({ _id: ID });
+
+    await request(app)
+      .put(`/api/v1/invoice-detail/${ID}`)
+      .set('X-API-Key', authHeader)
+      .send({ cantidad: 5, factura_id: 'someone-elses-invoice' });
+
+    const [, updateData] = invoiceDetailMock.statics.findByIdAndUpdate.mock.calls[0];
+    expect(updateData).toEqual({ cantidad: 5 });
+  });
+
   it('returns 500 when the database fails', async () => {
     invoiceDetailMock.statics.findById.mockRejectedValueOnce(new Error('mongo down'));
 

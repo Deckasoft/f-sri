@@ -58,7 +58,12 @@ router.put('/:id', async (req, res) => {
     const factura = await Invoice.findOne({ _id: existing.factura_id, empresa_emisora_id: companyId });
     if (!factura) return res.status(404).json({ message: 'Not found' });
 
-    const doc = await InvoiceDetail.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    // factura_id IS this model's tenant-linking field (InvoiceDetail carries
+    // no empresa_emisora_id of its own) — it must never be settable from the
+    // request body, or a tenant could reparent its own detail line onto
+    // another tenant's invoice by simply naming that invoice's id.
+    const { factura_id: _ignoredFacturaId, ...updateData } = req.body;
+    const doc = await InvoiceDetail.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
