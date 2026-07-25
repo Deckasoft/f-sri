@@ -8,6 +8,7 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
+    "build:scripts": "tsc -p tsconfig.scripts.json",
     "start": "node dist/index.js",
     "dev": "nodemon src/index.ts",
     "test": "jest",
