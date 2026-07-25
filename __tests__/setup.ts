@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { clearAllScheduledAuthorizationChecks } from '../src/utils/scheduledCheck.utils';
 
 // Global test setup
 jest.setTimeout(30000);
@@ -55,6 +56,14 @@ afterAll(() => {
 
 // Global test cleanup
 afterEach(() => {
+  // Cancel any real setTimeout a test's exercise of
+  // programarConsultaAutorizacion (invoice/credit-note/debit-note/
+  // delivery-note/withholding services) may have left pending — see
+  // src/utils/scheduledCheck.utils.ts. Otherwise a real ~5s timer a test
+  // forgot to mock away can fire during a LATER, unrelated test still
+  // running in the same Jest worker, intermittently flaking the suite.
+  clearAllScheduledAuthorizationChecks();
+
   // Clear all mocks after each test
   jest.clearAllMocks();
 });

@@ -8,6 +8,7 @@ import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
+import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import CreditNote from '../models/CreditNote';
 import CreditNoteDetail from '../models/CreditNoteDetail';
 import CreditNotePDF from '../models/CreditNotePDF';
@@ -272,6 +273,7 @@ export class CreditNoteService {
    */
   static programarConsultaAutorizacion(notaCreditoId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
     const timer = setTimeout(async () => {
+      unregisterScheduledCheck(timer);
       try {
         const resultado = await CreditNoteService.consultarAutorizacionSRI(notaCreditoId);
         const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
@@ -284,7 +286,12 @@ export class CreditNoteService {
       }
     }, delayMs);
 
+    // Do not keep the process alive because of the scheduled check. Also
+    // registered with scheduledCheck.utils so a test that forgets to mock
+    // this away can't leave a real timer pending into a later, unrelated
+    // test — see that module's doc comment.
     timer.unref?.();
+    registerScheduledCheck(timer);
   }
 
   /**
