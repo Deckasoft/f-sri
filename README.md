@@ -4,7 +4,7 @@
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](https://github.com/XaviMontero/f-sri/actions)
 [![Coverage](https://img.shields.io/badge/coverage-35%25-yellow.svg)](https://github.com/XaviMontero/f-sri)
 [![MIT License](https://img.shields.io/badge/License-MIT-green.svg)](https://choosealicense.com/licenses/mit/)
-[![Node.js](https://img.shields.io/badge/Node.js-18+-green.svg)](https://nodejs.org/)
+[![Node.js](https://img.shields.io/badge/Node.js-20+-green.svg)](https://nodejs.org/)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue.svg)](https://www.typescriptlang.org/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-6.0+-green.svg)](https://www.mongodb.com/)
 [![Express](https://img.shields.io/badge/Express-4.18+-lightgrey.svg)](https://expressjs.com/)
@@ -215,8 +215,15 @@ con las dependencias de Chromium que necesita Puppeteer) y un
 `compose.prod.yml` (API + Caddy como reverse proxy con TLS automático, sin
 contenedor de Mongo — la base de datos vive en MongoDB Atlas). Ver
 [`DEPLOYMENT.md`](DEPLOYMENT.md) para el procedimiento completo (variables de
-entorno requeridas, allowlisting de la IP del VPS en Atlas, `npm run
-create-admin` dentro del contenedor, y el flujo de actualización).
+entorno requeridas, allowlisting de la IP del VPS en Atlas, cómo crear el
+primer admin dentro del contenedor, y el flujo de actualización).
+
+> ⚠️ **Build local en Mac Apple Silicon (arm64):** usa
+> `docker build --platform linux/amd64 .` — Chromium no tiene build oficial
+> para Linux ARM64, así que un build nativo arm64 arranca pero Puppeteer no
+> puede lanzar el navegador en tiempo de ejecución. Un VPS real (Hostinger)
+> es x86_64, así que esto solo afecta builds locales en Apple Silicon. Ver
+> `DEPLOYMENT.md` y el encabezado del `Dockerfile` para más detalle.
 
 ## 🤝 Contribuir
 

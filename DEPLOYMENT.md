@@ -8,10 +8,32 @@ operativo puntual para esta fase de containerización.
 ## 1. Arquitectura
 
 - **`Dockerfile`** (raíz del repo): build multi-stage que compila el backend
-  (`src/` → `dist/`) y el SPA de administración (`admin/` → `admin/dist/`),
-  e instala en la imagen final las librerías de Debian que Chromium necesita
-  para que Puppeteer pueda generar los RIDE en PDF. Corre como el usuario
-  `node` (no root).
+  (`src/` → `dist/`, `scripts/create-admin.ts` → `dist-scripts/`) y el SPA de
+  administración (`admin/` → `admin/dist/`), e instala en la imagen final las
+  librerías de Debian que Chromium necesita para que Puppeteer pueda generar
+  los RIDE en PDF. Corre como el usuario `node` (no root). La imagen final
+  **no** incluye `src/`, `scripts/`, ningún `tsconfig*.json` ni
+  devDependencies (`ts-node`/`typescript`) — solo `dist/`, `dist-scripts/`,
+  `admin/dist/` y `node_modules` de producción. Este contenedor maneja
+  certificados `.p12` de firma de clientes y emite comprobantes tributarios
+  con validez legal, así que minimizar lo que queda alcanzable ahí dentro
+  importa más que en una app típica.
+
+  > ⚠️ **Build local en Mac Apple Silicon (arm64):** pasa
+  > `--platform linux/amd64` al construir la imagen localmente:
+  > ```bash
+  > docker build --platform linux/amd64 -t f-sri .
+  > ```
+  > Google no publica un build oficial de Chrome para Linux ARM64, así que el
+  > descargador de Puppeteer termina bajando un binario x64 incluso en un
+  > host/imagen arm64. Un `docker build .` sin `--platform` en un Mac de
+  > Apple Silicon **construye la imagen sin errores**, pero Chromium no
+  > puede arrancar en tiempo de ejecución (`rosetta error: failed to open
+  > elf at /lib64/ld-linux-x86-64.so.2`) — generación de PDF rota en
+  > silencio. Un VPS real (Hostinger) es x86_64, así que esto **no afecta el
+  > despliegue en producción** (la imagen la construye GitHub Actions en un
+  > runner x86_64, y CI no necesita el flag) — es solo una trampa para
+  > cualquiera que construya la imagen a mano en una Mac M1/M2/M3/M4.
 - **`compose.prod.yml`**: dos servicios —
   - `api`: la imagen de arriba, sin publicar puertos al host directamente.
   - `caddy`: termina TLS (HTTPS automático vía Let's Encrypt) y hace reverse
@@ -97,42 +119,70 @@ permitidas (Network Access). Antes de que `MONGO_URI` funcione desde el VPS:
 
 ## 4. Primer despliegue
 
+La imagen se construye y publica automáticamente en GHCR por el job `docker`
+de `.github/workflows/ci.yml` en cada push a `main`, en
+**`ghcr.io/deckasoft/f-sri`** (el job calcula `ghcr.io/${{ github.repository
+}}` en minúsculas — los paths de GHCR/Docker deben ser todo minúsculas — para
+este repo, `github.com/Deckasoft/f-sri`, eso da `ghcr.io/deckasoft/f-sri`).
+`compose.prod.yml` ya trae ese valor como default de `GHCR_IMAGE`, así que
+normalmente **no** necesitas exportar la variable — solo hazlo si vas a
+desplegar un fork o una imagen con otro nombre. Ese job **solo publica la
+imagen**; no despliega. Ver la sección 6 para el flujo de actualización.
+
+**Antes del primer `pull`: los paquetes de GHCR son privados por defecto.**
+`docker compose pull` falla con un error de autenticación en el VPS a menos
+que hagas una de estas dos cosas:
+
+- **Opción A — login con un PAT (recomendado para mantener el paquete privado):**
+  crea un GitHub Personal Access Token (classic) con el scope `read:packages`
+  y, en el VPS:
+  ```bash
+  echo "$GHCR_PAT" | docker login ghcr.io -u <tu-usuario-github> --password-stdin
+  ```
+  El login persiste en `~/.docker/config.json`; no hace falta repetirlo en
+  cada despliegue salvo que rotes el token.
+- **Opción B — hacer público el paquete:** en GitHub → el repo →
+  Packages → `f-sri` → Package settings → Change visibility → Public. Con
+  el paquete público, `docker compose pull` funciona sin login. Más simple,
+  pero expone la imagen (no contiene secretos — `.env.production` nunca se
+  hornea en ella — pero sí expone el código fuente compilado).
+
 ```bash
 # En el VPS, en el directorio donde viven compose.prod.yml, Caddyfile y
 # .env.production:
 
 # 1. Editar el Caddyfile: reemplazar "yourdomain.com" por el dominio real.
 
-# 2. (Opcional) fijar la imagen exacta a desplegar
-export GHCR_IMAGE=ghcr.io/<owner>/<repo>:latest
+# 2. (Solo si el login de GHCR no está hecho aún) autenticarse — ver arriba.
 
 # 3. Traer la imagen y levantar los servicios
 docker compose -f compose.prod.yml pull
 docker compose -f compose.prod.yml up -d
 
 # 4. Verificar
+docker compose -f compose.prod.yml ps          # columna "STATUS" debe decir "healthy"
 docker compose -f compose.prod.yml logs -f api
 curl -I https://tudominio.com/health
 ```
 
-La imagen se construye y publica automáticamente en GHCR
-(`ghcr.io/<owner>/<repo>`) por el job `docker` de
-`.github/workflows/ci.yml` en cada push a `main`. Ese job **solo publica la
-imagen**; no despliega. Ver la sección 6 para el flujo de actualización.
-
 ## 5. Crear el primer usuario admin
 
-`npm run create-admin` es un script ts-node (no compilado a `dist/`); la
-imagen mantiene `ts-node`/`typescript` y `scripts/` disponibles justo para
-esto. Ejecutarlo dentro del contenedor ya corriendo:
+`scripts/create-admin.ts` se precompila a `dist-scripts/scripts/create-admin.js`
+durante el build de la imagen (ver `tsconfig.scripts.json`) — el contenedor
+en producción no tiene `ts-node`/`typescript` ni el código fuente en `src/`
+(ver sección 1), así que se ejecuta con `node` directo, no con
+`npm run create-admin` (ese script sigue existiendo en `package.json` para
+uso local en desarrollo, vía ts-node, pero no aplica dentro del contenedor):
 
 ```bash
 docker compose -f compose.prod.yml exec api \
-  npm run create-admin -- admin@tuempresa.com "una-contraseña-segura"
+  node dist-scripts/scripts/create-admin.js admin@tuempresa.com "una-contraseña-segura"
 ```
 
 (o vía `ADMIN_EMAIL`/`ADMIN_PASSWORD` como variables de entorno del `exec`,
-ver `scripts/create-admin.ts`). Con eso puedes hacer login en
+p. ej. `docker compose -f compose.prod.yml exec -e ADMIN_EMAIL=... -e
+ADMIN_PASSWORD=... api node dist-scripts/scripts/create-admin.js` — ver
+`scripts/create-admin.ts` para la lógica). Con eso puedes hacer login en
 `POST /admin/api/auth/login` y acceder al backoffice en `/admin`.
 
 ## 6. Actualizar a una nueva versión
@@ -158,3 +208,33 @@ Caddyfile). El despliegue es manual/por SSH a propósito — ver
   configuración adicional.
 - Los logs van a stdout/stderr (`docker compose logs`); no hay rotación de
   archivos de log que gestionar dentro del contenedor.
+- **Límite de memoria (`mem_limit`)**: `compose.prod.yml` fija `mem_limit:
+  768m` / `mem_reservation: 256m` en el servicio `api`. Puppeteer/Chromium
+  (invocado por cada PDF, ver `src/utils/pdf.utils.ts`) consume memoria de
+  forma notable; sin un techo, un ciclo de OOM combinado con `restart:
+  always` puede generar presión de memoria a nivel de todo el VPS (afectando
+  también a Caddy). Ajusta el valor según el plan contratado en Hostinger:
+  observa el uso real con `docker stats` bajo carga normal antes de subir o
+  bajar el límite, y deja margen para el propio Node.js + Chromium
+  simultáneo si esperas PDFs concurrentes.
+
+### Troubleshooting: "el contenedor está `Up` pero no responde"
+
+Sospecha primero de MongoDB Atlas — es el fallo más común en un primer
+despliegue (IP del VPS no allowlisteada todavía, ver sección 3):
+
+1. `docker compose -f compose.prod.yml ps` — si la columna `STATUS` dice
+   algo distinto de `healthy` (p. ej. `starting` que nunca pasa a `healthy`,
+   o `unhealthy`), el healthcheck de `/health` está fallando.
+2. `docker compose -f compose.prod.yml logs api` — busca
+   `❌ Database connection error`. `src/index.ts` llama a `process.exit(1)`
+   si la conexión inicial a Mongo falla, así que con `restart: always` el
+   contenedor entra en un ciclo de reinicios en vez de quedar "vivo pero
+   sordo" (nunca abre el puerto 3000, nunca responde nada, y desde afuera
+   parece un problema de Caddy/TLS en vez de uno de base de datos).
+3. Si ves ese error, confirma el allowlisting de la IP del VPS en Atlas
+   (sección 3) y que `MONGO_URI` en `.env.production` es exactamente el que
+   Atlas te dio (usuario/contraseña/nombre de base incluidos).
+4. Si el healthcheck falla pero no hay error de Mongo en los logs, revisa
+   `docker compose logs caddy` — puede ser un problema de DNS/TLS entre
+   Caddy e Internet, no del contenedor `api` en sí.
