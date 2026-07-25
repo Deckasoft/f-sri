@@ -132,9 +132,21 @@ administrador.
     cadena de `X-Forwarded-For` (spoofeable por el propio cliente) y
     `express-rate-limit` rechaza arrancar con esa configuración
     (`ERR_ERL_PERMISSIVE_TRUST_PROXY`).
-- **CORS**: configurable vía `ALLOWED_ORIGINS` (lista separada por comas) y
-  `CORS_DISABLED` (ver `src/config/cors.config.ts`); nunca deshabilitar CORS
-  en producción.
+- **CORS** (`src/config/cors.config.ts`): configurable vía `ALLOWED_ORIGINS`
+  (lista separada por comas) y `CORS_DISABLED`; nunca deshabilitar CORS en
+  producción. Además de esa lista configurable:
+  - Los orígenes de `localhost`/`127.0.0.1` incluidos por defecto solo se
+    agregan cuando `NODE_ENV !== 'production'` — nunca forman parte de la
+    lista de orígenes permitidos en producción.
+  - `Authorization` y `X-API-Key` (la credencial primaria de tenant, ver
+    "API de facturación" arriba) están en `allowedHeaders`, para que un
+    navegador (no solo curl/Postman) pueda enviarlos.
+  - No hay ninguna regla hardcodeada que permita un dominio de terceros; una
+    versión anterior permitía cualquier `*.vercel.app` cuyo subdominio
+    contuviera una substring concreta (un proyecto de Vercel ajeno,
+    heredado de upstream) — se eliminó por ser una substring, no una
+    coincidencia exacta, y por conceder un origen con credenciales
+    (`credentials: true`) a un tercero no relacionado con este sistema.
 - **Validación de entorno al arrancar (fail-fast)**: `src/config/env.config.ts`
   detiene el proceso si `JWT_SECRET`, `ENCRYPTION_KEY` (64 hex), `MONGO_URI` o
   `PUBLIC_URL` faltan o tienen formato inválido, en lugar de arrancar en un

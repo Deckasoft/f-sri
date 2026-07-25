@@ -16,7 +16,6 @@ jest.mock('puppeteer', () => ({
 // Mock PDF utilities
 jest.mock('../src/utils/pdf.utils', () => ({
   generateInvoicePDF: jest.fn().mockResolvedValue(Buffer.from('mock-pdf-content')),
-  savePDFToFile: jest.fn().mockResolvedValue('/tmp/mock-file.pdf'),
 }));
 
 // Mock InvoicePDF model

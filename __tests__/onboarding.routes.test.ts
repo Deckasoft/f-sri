@@ -17,13 +17,13 @@ jest.mock('../src/models/Invite', () => ({
 // --- IssuingCompany mock ---
 const issuingCompanyStaticMocks = {
   findById: jest.fn().mockResolvedValue(null),
-  findByIdAndUpdate: jest.fn().mockResolvedValue(null),
+  findOneAndUpdate: jest.fn().mockResolvedValue(null),
 };
 jest.mock('../src/models/IssuingCompany', () => ({
   __esModule: true,
   default: {
     findById: (...args: any[]) => issuingCompanyStaticMocks.findById(...args),
-    findByIdAndUpdate: (...args: any[]) => issuingCompanyStaticMocks.findByIdAndUpdate(...args),
+    findOneAndUpdate: (...args: any[]) => issuingCompanyStaticMocks.findOneAndUpdate(...args),
   },
 }));
 
@@ -68,7 +68,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
     inviteStaticMocks.findOne.mockResolvedValue(null);
     inviteStaticMocks.findOneAndUpdate.mockResolvedValue(null);
     issuingCompanyStaticMocks.findById.mockResolvedValue(null);
-    issuingCompanyStaticMocks.findByIdAndUpdate.mockResolvedValue(null);
+    issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValue(null);
     verifyP12PasswordMock.mockResolvedValue({ valid: true });
   });
 
@@ -159,7 +159,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
 
       expect(res.status).toBe(400);
       expect(res.body.message).toMatch(/invalid|expired|used/i);
-      expect(issuingCompanyStaticMocks.findByIdAndUpdate).not.toHaveBeenCalled();
+      expect(issuingCompanyStaticMocks.findOneAndUpdate).not.toHaveBeenCalled();
       expect(savedApiKeys).toHaveLength(0);
     });
 
@@ -168,7 +168,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
         _id: 'invite-1',
         empresa_emisora_id: 'company-1',
       });
-      issuingCompanyStaticMocks.findByIdAndUpdate.mockResolvedValueOnce(company);
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(company);
 
       await request(app).post('/onboarding/api/complete').send(validBody());
 
@@ -184,7 +184,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
         _id: 'invite-1',
         empresa_emisora_id: 'company-1',
       });
-      issuingCompanyStaticMocks.findByIdAndUpdate.mockResolvedValueOnce(company);
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(company);
 
       const res = await request(app).post('/onboarding/api/complete').send(validBody());
 
@@ -197,8 +197,12 @@ describe('Public onboarding routes (/onboarding/api)', () => {
         ruc: company.ruc,
       });
 
-      const [companyId, updatePayload, options] = issuingCompanyStaticMocks.findByIdAndUpdate.mock.calls[0];
-      expect(companyId).toBe('company-1');
+      const [filterArg, updatePayload, options] = issuingCompanyStaticMocks.findOneAndUpdate.mock.calls[0];
+      // Existence + active check and the certificate write happen as ONE
+      // atomic operation (see L-5 in the whole-branch review): a suspended
+      // tenant must not be able to overwrite its certificate via a
+      // still-live invite.
+      expect(filterArg).toEqual({ _id: 'company-1', active: true });
       expect(updatePayload.certificate).not.toBe(validBody().certificate);
       expect(updatePayload.certificate_password).not.toBe('super-secret');
       expect(updatePayload.onboarded_at).toBeInstanceOf(Date);
@@ -214,13 +218,13 @@ describe('Public onboarding routes (/onboarding/api)', () => {
         _id: 'invite-1',
         empresa_emisora_id: 'company-1',
       });
-      issuingCompanyStaticMocks.findByIdAndUpdate.mockResolvedValueOnce(company);
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(company);
 
       await request(app)
         .post('/onboarding/api/complete')
         .send({ ...validBody(), contact_email: 'ops@empresademo.com' });
 
-      const [, updatePayload] = issuingCompanyStaticMocks.findByIdAndUpdate.mock.calls[0];
+      const [, updatePayload] = issuingCompanyStaticMocks.findOneAndUpdate.mock.calls[0];
       expect(updatePayload.email_notificacion).toBe('ops@empresademo.com');
     });
 
@@ -229,11 +233,31 @@ describe('Public onboarding routes (/onboarding/api)', () => {
         _id: 'invite-1',
         empresa_emisora_id: 'ghost-company',
       });
-      issuingCompanyStaticMocks.findByIdAndUpdate.mockResolvedValueOnce(null);
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(null);
+      issuingCompanyStaticMocks.findById.mockResolvedValueOnce(null);
 
       const res = await request(app).post('/onboarding/api/complete').send(validBody());
 
       expect(res.status).toBe(404);
+      expect(savedApiKeys).toHaveLength(0);
+    });
+
+    it('returns 403 and writes nothing when the invite points at a SUSPENDED tenant', async () => {
+      inviteStaticMocks.findOneAndUpdate.mockResolvedValueOnce({
+        _id: 'invite-1',
+        empresa_emisora_id: 'company-1',
+      });
+      // The { active: true } filter excludes a suspended tenant, so the
+      // conditional update matches nothing.
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(null);
+      // The follow-up read-only lookup (for the error message only) finds
+      // the tenant, but inactive.
+      issuingCompanyStaticMocks.findById.mockResolvedValueOnce({ ...company, active: false });
+
+      const res = await request(app).post('/onboarding/api/complete').send(validBody());
+
+      expect(res.status).toBe(403);
+      expect(res.body.message).toMatch(/suspend/i);
       expect(savedApiKeys).toHaveLength(0);
     });
   });

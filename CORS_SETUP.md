@@ -14,9 +14,15 @@ habilitar un frontend/backoffice adicional.
 
 `src/config/cors.config.ts` implementa una configuración de CORS que permite:
 
-- ✅ **Desarrollo**: Cualquier `localhost` o `127.0.0.1`
+- ✅ **Desarrollo**: Cualquier `localhost` o `127.0.0.1` (solo cuando
+  `NODE_ENV !== 'production'` — estos orígenes nunca se agregan a la lista
+  permitida en producción)
 - ✅ **Peticiones sin origen**: Postman, aplicaciones móviles, cURL
 - ✅ **Dominios personalizados**: Vía la variable de entorno `ALLOWED_ORIGINS`
+
+No hay ninguna regla adicional hardcodeada que permita un dominio de
+terceros no listado en `ALLOWED_ORIGINS` — si tu frontend/backoffice no está
+ahí (o no es `localhost` en desarrollo), agrégalo explícitamente.
 
 ### Variables de Entorno
 
@@ -34,28 +40,33 @@ Ver `.env.example` para el detalle completo.
 
 ## 🧪 **Testing de CORS**
 
-### Endpoints de Prueba
+### Endpoint de Prueba
 
-1. **Health Check** (público):
-   ```
-   GET $BASE_URL/health
-   ```
+**Health Check** (público, no requiere autenticación):
+```
+GET $BASE_URL/health
+```
 
-2. **CORS Test** (público):
-   ```
-   GET $BASE_URL/cors-test
-   ```
+> Nota: este documento describía antes un endpoint adicional `GET
+> /cors-test` que reflejaba de vuelta los headers de la petición (incluida
+> cualquier credencial que el caller enviara). Aunque solo reflejaba las
+> propias credenciales del caller (no filtraba nada de terceros), era un
+> endpoint de debug sin autenticar montado en la imagen de producción y con
+> divergencia entre el árbol de rutas probado por los tests
+> (`src/testApp.ts`) y el efectivamente montado (`src/index.ts`) — se
+> eliminó por completo. Usa `GET /health` o una llamada real a
+> `/api/v1/...`/`/onboarding/api/...` con tu API key/token para verificar
+> CORS end-to-end.
 
 ### Desde el Frontend
 
 ```javascript
-// Ejemplo con fetch
-fetch(`${BASE_URL}/cors-test`, {
+// Ejemplo con fetch, incluyendo la API key de tenant
+fetch(`${BASE_URL}/api/v1/issuing-company`, {
   method: 'GET',
   headers: {
-    'Content-Type': 'application/json',
+    'X-API-Key': 'sk_live_...',
   },
-  credentials: 'include', // Importante para CORS
 })
 .then(response => response.json())
 .then(data => console.log('✅ CORS working:', data))
@@ -98,5 +109,5 @@ Si sigues teniendo problemas:
 
 - [ ] ✅ `ALLOWED_ORIGINS` configurado con el/los dominio(s) reales del frontend
 - [ ] ✅ Frontend usa `credentials: 'include'` si depende de cookies (la mayoría de integraciones vía `X-API-Key` no lo necesitan)
-- [ ] ✅ `GET /health` y `GET /cors-test` responden correctamente desde el origen del frontend
+- [ ] ✅ `GET /health` responde correctamente desde el origen del frontend
 - [ ] ✅ `CORS_DISABLED=false` en producción 

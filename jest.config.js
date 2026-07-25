@@ -9,8 +9,7 @@ module.exports = {
     '!src/index.ts',
     '!src/swagger.ts',
     '!src/config/**',
-    '!src/middleware/corsErrorHandler.ts',
-    '!src/routes/cors-test.ts'
+    '!src/middleware/corsErrorHandler.ts'
   ],
   coverageDirectory: 'coverage',
   coverageReporters: ['text', 'lcov', 'html'],

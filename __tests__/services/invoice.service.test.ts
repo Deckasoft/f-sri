@@ -372,23 +372,10 @@ describe('InvoiceService', () => {
     });
   });
 
-  describe('P12 helpers (real certificate)', () => {
-    // verifyP12Password and the P12 temp-file lifecycle now live in
-    // certificate.utils.ts and are covered by certificate.utils.test.ts.
-
-    it('convertP12ToPem produces a combined PEM with key and certificate', async () => {
-      const pemPath = await InvoiceService.convertP12ToPem(p12Path, P12_PASSWORD);
-
-      const contenido = fs.readFileSync(pemPath, 'utf8');
-      expect(contenido).toContain('PRIVATE KEY');
-      expect(contenido).toContain('BEGIN CERTIFICATE');
-      fs.unlinkSync(pemPath);
-    });
-
-    it('convertP12ToPem throws a password error for a wrong password', async () => {
-      await expect(InvoiceService.convertP12ToPem(p12Path, 'incorrecta')).rejects.toThrow('contraseña');
-    });
-  });
+  // P12 helpers: verifyP12Password and the P12 temp-file lifecycle now live
+  // in certificate.utils.ts and are covered by certificate.utils.test.ts.
+  // convertP12ToPem (previously tested here) had no production caller --
+  // deleted along with its tests, see the whole-branch review (L-1).
 
   describe('procesarEnvioSRI', () => {
     const facturaDoc = () => ({

@@ -5,6 +5,59 @@ con Hostinger) usando MongoDB Atlas como base de datos. No es una reescritura
 del README (eso es tarea de una fase posterior) — es el procedimiento
 operativo puntual para esta fase de containerización.
 
+> ## ⚠️ ESTE RELEASE ASUME UNA BASE DE DATOS VACÍA/NUEVA
+>
+> Todo este documento asume que `MONGO_URI` apunta a una base de datos **sin
+> datos previos** (un clúster de Atlas recién creado, o cualquier Mongo
+> vacío). El plan de este release es un arranque limpio ("clean start"), sin
+> datos en producción de antes. **Si alguna vez se despliega esta imagen
+> sobre una base de datos que YA contiene `clients`, `products`, o
+> comprobantes emitidos de una versión anterior de este sistema, hace falta
+> una migración de backfill ANTES de arrancar el contenedor** — no hacerlo
+> rompe el arranque o la emisión de comprobantes de forma silenciosa/difícil
+> de diagnosticar. Concretamente:
+>
+> 1. **`Client` y `Product` ahora requieren `empresa_emisora_id`** (campo
+>    obligatorio) más un índice único compuesto por tenant
+>    (`{ empresa_emisora_id, identificacion }` / `{ empresa_emisora_id,
+>    codigo }` — ver `src/models/Client.ts` / `src/models/Product.ts`).
+>    Documentos legacy sin ese campo:
+>    - Fallan la validación de Mongoose en el primer `.save()` que los toque.
+>    - Rompen la construcción del índice único con un rechazo `E11000` que
+>      Mongoose solo *loguea* (vía `autoIndex`), sin detener el arranque —
+>      así que el contenedor parece "arrancar bien" mientras el índice queda
+>      a medio construir o simplemente no se construye.
+>    - **La migración debe**: backfillear `empresa_emisora_id` en cada
+>      `Client`/`Product` legacy con el tenant correcto (deducido de qué
+>      esquema/base/cuenta pertenecía cada documento en el sistema
+>      pre-multi-tenant), y solo entonces dejar que Mongoose construya el
+>      índice único compuesto — verificando antes que no haya colisiones
+>      reales dentro de un mismo tenant recién asignado (dos clientes con la
+>      misma `identificacion` bajo el mismo `empresa_emisora_id` haría fallar
+>      el backfill, no el arranque, así que hay que revisar duplicados
+>      primero).
+> 2. **El contador atómico de secuenciales es una colección nueva que
+>    arranca en `current: 0`** (`src/models/Sequence.ts` /
+>    `src/utils/sequence.utils.ts`), reemplazando la lógica anterior que
+>    derivaba el secuencial del máximo existente en los documentos ya
+>    emitidos. Desplegado sobre una base con comprobantes ya emitidos, la
+>    primera emisión post-deploy de cada (tenant, tipo de documento)
+>    reutilizará `000000001` — **el SRI la rechaza como duplicada**, un corte
+>    de la operación de negocio principal (emitir comprobantes), no solo un
+>    error de arranque.
+>    - **La migración debe**: para cada `(empresa_emisora_id,
+>      document_type)` que ya tenga documentos emitidos, crear/actualizar su
+>      documento `Sequence` con `current` igual al secuencial más alto ya
+>      emitido para ese tenant y tipo (no `0`), ANTES de que el contenedor
+>      nuevo emita el primer comprobante.
+>
+> Si este release se despliega tal cual sobre una base de datos con datos
+> preexistentes SIN antes escribir y correr esa migración, es un despliegue
+> roto: no es una advertencia teórica, es la ruta esperada de fallo. Esta
+> guía no incluye el script de migración — escríbelo y córrelo (una sola vez,
+> antes del primer `docker compose up`) si este release llega a desplegarse
+> sobre una base que no está vacía.
+
 ## 1. Arquitectura
 
 - **`Dockerfile`** (raíz del repo): build multi-stage que compila el backend
@@ -118,6 +171,10 @@ permitidas (Network Access). Antes de que `MONGO_URI` funcione desde el VPS:
    contenedor.
 
 ## 4. Primer despliegue
+
+> ⚠️ Antes de continuar: confirma que `MONGO_URI` apunta a una base de datos
+> **vacía/nueva**. Si no lo es, ver la advertencia al comienzo de este
+> documento — hace falta una migración de backfill primero.
 
 La imagen se construye y publica automáticamente en GHCR por el job `docker`
 de `.github/workflows/ci.yml` en cada push a `main`, en

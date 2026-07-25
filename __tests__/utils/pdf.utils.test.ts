@@ -15,14 +15,12 @@ jest.mock('puppeteer', () => ({
   default: { launch: (...args: any[]) => launchMock(...args) },
 }));
 
-import fs from 'fs';
 import {
   generateInvoicePDF,
   generateCreditNotePDF,
   generateDebitNotePDF,
   generateDeliveryNotePDF,
   generateWithholdingPDF,
-  savePDFToFile,
 } from '../../src/utils/pdf.utils';
 
 const empresaMock: any = {
@@ -285,15 +283,5 @@ describe('PDF generators', () => {
     ).rejects.toThrow('Failed to generate PDF');
 
     expect(closeMock).toHaveBeenCalled();
-  });
-});
-
-describe('savePDFToFile', () => {
-  it('writes the buffer to a temp file and returns its path', async () => {
-    const filePath = await savePDFToFile(Buffer.from('pdf'), `test-pdf-${process.pid}`);
-
-    expect(filePath).toContain('test-pdf');
-    expect(fs.existsSync(filePath)).toBe(true);
-    fs.unlinkSync(filePath);
   });
 });

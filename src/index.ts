@@ -17,7 +17,6 @@ import helmet from 'helmet';
 import { getCorsConfig } from './config/cors.config';
 import { tenantLimiter } from './config/rateLimit.config';
 import swaggerSpec from './swagger';
-import corsTestRoutes from './routes/cors-test';
 import adminAuthRoutes from './routes/admin/auth';
 import adminRoutes from './routes/admin';
 import onboardingRoutes from './routes/onboarding';
@@ -75,8 +74,6 @@ app.use((req, res, next) => {
 
 // Middleware para parsear JSON
 app.use(express.json());
-
-app.use(corsTestRoutes);
 
 const swaggerHtml = `<!DOCTYPE html>
 <html>

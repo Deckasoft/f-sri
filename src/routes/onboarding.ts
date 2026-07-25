@@ -133,8 +133,16 @@ router.post('/complete', async (req, res) => {
       return res.status(400).json({ message: 'Invalid, expired, or already used invite token' });
     }
 
-    const company = await IssuingCompany.findByIdAndUpdate(
-      invite.empresa_emisora_id,
+    // `active: true` in the filter makes the write conditional: a tenant
+    // suspended via PUT /admin/api/tenants/:id/active (fraud, non-payment)
+    // must not be able to redeem a still-live invite to overwrite its stored
+    // certificate or mint a new ApiKey — apiKeyAuth already rejects that
+    // tenant's keys, but nothing upstream of this route previously stopped
+    // it from *writing* here. This does the existence + active check and the
+    // update as a single atomic operation, so there's no separate
+    // read-then-write race window.
+    const company = await IssuingCompany.findOneAndUpdate(
+      { _id: invite.empresa_emisora_id, active: true },
       {
         certificate: encrypt(certificate),
         certificate_password: encrypt(certificatePassword),
@@ -144,6 +152,13 @@ router.post('/complete', async (req, res) => {
       { new: true },
     );
     if (!company) {
+      // The filter above matches "not found" and "suspended" identically, so
+      // a second, read-only lookup distinguishes them purely for the error
+      // message -- neither branch has written anything to the tenant.
+      const existingCompany = await IssuingCompany.findById(invite.empresa_emisora_id);
+      if (existingCompany && !existingCompany.active) {
+        return res.status(403).json({ message: 'This tenant has been suspended and cannot complete onboarding' });
+      }
       return res.status(404).json({ message: 'Tenant not found' });
     }
 

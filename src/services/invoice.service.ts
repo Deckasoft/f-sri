@@ -16,10 +16,6 @@ import IdentificationType, { IIdentificationType } from '../models/Identificatio
 import IssuingCompany, { IIssuingCompany } from '../models/IssuingCompany';
 import Client, { IClient } from '../models/Client';
 import Product, { IProduct } from '../models/Product';
-import fs from 'fs';
-import path from 'path';
-import os from 'os';
-import forge from 'node-forge';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con facturas
@@ -368,108 +364,6 @@ export class InvoiceService {
   }
 
   /**
-   * Convierte un archivo P12 a formato PEM usando node-forge
-   * @param p12Path Ruta al archivo P12
-   * @param password Contraseña del certificado
-   * @returns Promesa con la ruta al archivo PEM generado
-   */
-  static async convertP12ToPem(p12Path: string, password: string): Promise<string> {
-    try {
-      const p12Buffer = fs.readFileSync(p12Path);
-      const p12Base64 = p12Buffer.toString('base64');
-      const p12Der = forge.util.decode64(p12Base64);
-      const p12Asn1 = forge.asn1.fromDer(p12Der);
-
-      let p12;
-      try {
-        p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, password);
-      } catch (pkcs12Error: any) {
-        if (password && password.length > 0) {
-          try {
-            p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, '');
-          } catch (emptyPassError: any) {
-            try {
-              p12 = forge.pkcs12.pkcs12FromAsn1(p12Asn1, false, null as any);
-            } catch (nullPassError: any) {
-              throw new Error(
-                `Error de contraseña del certificado P12. Verifique que la contraseña sea correcta. Error original: ${pkcs12Error.message}`,
-              );
-            }
-          }
-        } else {
-          throw new Error(
-            `Error de contraseña del certificado P12. La contraseña proporcionada no es válida. Error: ${pkcs12Error.message}`,
-          );
-        }
-      }
-
-      const bags = p12.getBags({ bagType: forge.pki.oids.certBag });
-      const certBags = bags[forge.pki.oids.certBag] || [];
-
-      const keyBags = p12.getBags({ bagType: forge.pki.oids.pkcs8ShroudedKeyBag });
-      const keyBag =
-        keyBags[forge.pki.oids.pkcs8ShroudedKeyBag]?.[0] ||
-        p12.getBags({ bagType: forge.pki.oids.keyBag })[forge.pki.oids.keyBag]?.[0];
-
-      if (!certBags.length || !keyBag) {
-        throw new Error(
-          'Certificado o clave privada no encontrados en el archivo P12. El archivo puede estar corrupto o tener un formato incorrecto.',
-        );
-      }
-
-      const certBag = certBags[0];
-      const privateKey = keyBag.key;
-      const certificate = certBag.cert;
-
-      if (!privateKey || !certificate) {
-        throw new Error('No se pudo extraer el certificado o la clave privada del archivo P12');
-      }
-
-      const pemCertificate = forge.pki.certificateToPem(certificate);
-      const pemPrivateKey = forge.pki.privateKeyToPem(privateKey);
-
-      const tempDir = os.tmpdir();
-      const certPath = path.join(tempDir, `cert-${Date.now()}.pem`);
-      const keyPath = path.join(tempDir, `key-${Date.now()}.pem`);
-
-      fs.writeFileSync(certPath, pemCertificate);
-      fs.writeFileSync(keyPath, pemPrivateKey);
-
-      const certContent = fs.readFileSync(certPath, 'utf8');
-      const keyContent = fs.readFileSync(keyPath, 'utf8');
-
-      const combinedPemPath = path.join(tempDir, `combined-${Date.now()}.pem`);
-
-      const formattedCert = certContent.trim();
-      const formattedKey = keyContent.trim();
-
-      const combinedContent = `${formattedKey}\n\n${formattedCert}`;
-
-      fs.writeFileSync(combinedPemPath, combinedContent);
-
-      return combinedPemPath;
-    } catch (error) {
-      if (error instanceof Error) {
-        if (error.message.includes('MAC could not be verified')) {
-          throw new Error(
-            `Error de contraseña del certificado P12: La contraseña proporcionada es incorrecta. Verifique la contraseña del certificado digital.`,
-          );
-        } else if (error.message.includes('Invalid password')) {
-          throw new Error(
-            `Error de contraseña del certificado P12: Contraseña inválida. Verifique que la contraseña del certificado sea correcta.`,
-          );
-        } else if (error.message.includes('PKCS#12')) {
-          throw new Error(
-            `Error en el certificado P12: ${error.message}. Verifique que el archivo del certificado sea válido.`,
-          );
-        }
-      }
-
-      throw new Error(`Error en conversión P12 a PEM: ${(error as Error).message}`);
-    }
-  }
-
-  /**
    * Generates and saves PDF when invoice is approved by SRI
    * Uses the configured storage provider (Cloudinary, Local, etc.)
    * @param factura The approved invoice
@@ -519,7 +413,7 @@ export class InvoiceService {
       const invoicePDF = new InvoicePDF({
         factura_id: factura._id,
         claveAcceso: factura.clave_acceso,
-        pdf_url: uploadResult.url, // URL pública del PDF
+        pdf_url: uploadResult.url, // Key de S3 (proveedor s3) o URL pública (cloudinary/local) -- ver src/models/InvoicePDF.ts
         pdf_public_id: uploadResult.publicId, // ID para eliminar/gestionar el archivo
         pdf_provider: uploadResult.provider, // Proveedor usado (cloudinary, local, etc.)
         tamano_archivo: uploadResult.size,
