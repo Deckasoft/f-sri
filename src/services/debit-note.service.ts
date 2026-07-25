@@ -7,10 +7,10 @@ import { generateDebitNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
 import DebitNote from '../models/DebitNote';
 import DebitNotePDF from '../models/DebitNotePDF';
 import Invoice from '../models/Invoice';
-import IssuingCompany from '../models/IssuingCompany';
 import { IClient } from '../models/Client';
 
 /**
@@ -36,29 +36,16 @@ export class DebitNoteService {
 
   /**
    * Genera el siguiente secuencial de nota de débito para una empresa
+   * (codDoc '05'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaNota = await DebitNote.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaNota) {
-      const siguiente = parseInt(ultimaNota.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '05');
   }
 
   /**
    * Valida y resuelve todas las entidades necesarias para emitir la nota de débito
    */
-  static async procesarNotaDebitoCompleta(datos: DebitNoteRequest) {
+  static async procesarNotaDebitoCompleta(datos: DebitNoteRequest, companyId: string) {
     if (!this.validarDatosNotaDebito(datos)) {
       throw new Error('Datos de nota de débito inválidos o incompletos');
     }
@@ -68,17 +55,14 @@ export class DebitNoteService {
       throw new Error('Identification type not found');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const cliente = await InvoiceService.buscarClient(datos.infoNotaDebito.identificacionComprador);
+    const cliente = await InvoiceService.buscarClient(datos.infoNotaDebito.identificacionComprador, companyId);
     if (!cliente) {
       throw new Error('Client not found');
     }
 
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoNotaDebito.fechaEmision);
     const fechaEmisionDocSustento = convertirFecha(datos.infoNotaDebito.fechaEmisionDocSustento);
 
@@ -106,11 +90,12 @@ export class DebitNoteService {
    * Procesa y guarda una nota de débito completa,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos de la nota de débito recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns La nota de débito creada
    */
-  static async crearNotaDebitoCompleta(datos: DebitNoteRequest) {
+  static async crearNotaDebitoCompleta(datos: DebitNoteRequest, companyId: string) {
     const { empresa, cliente, secuencial, fechaEmision, fechaEmisionDocSustento, facturaModificada } =
-      await this.procesarNotaDebitoCompleta(datos);
+      await this.procesarNotaDebitoCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({

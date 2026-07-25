@@ -7,9 +7,9 @@ import { generateWithholdingPDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
 import Withholding from '../models/Withholding';
 import WithholdingPDF from '../models/WithholdingPDF';
-import IssuingCompany from '../models/IssuingCompany';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con
@@ -42,40 +42,24 @@ export class WithholdingService {
   }
 
   /**
-   * Genera el siguiente secuencial de comprobante de retención para una empresa
+   * Genera el siguiente secuencial de comprobante de retención para una
+   * empresa (codDoc '07'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaRetencion = await Withholding.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaRetencion) {
-      const siguiente = parseInt(ultimaRetencion.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '07');
   }
 
   /**
    * Valida y resuelve todas las entidades necesarias para emitir el comprobante
    */
-  static async procesarRetencionCompleta(datos: WithholdingRequest) {
+  static async procesarRetencionCompleta(datos: WithholdingRequest, companyId: string) {
     if (!this.validarDatosRetencion(datos)) {
       throw new Error('Datos de comprobante de retención inválidos o incompletos');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoCompRetencion.fechaEmision);
 
     if (isNaN(fechaEmision.getTime())) {
@@ -93,10 +77,11 @@ export class WithholdingService {
    * Procesa y guarda un comprobante de retención completo,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos del comprobante de retención recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns El comprobante de retención creado
    */
-  static async crearRetencionCompleta(datos: WithholdingRequest) {
-    const { empresa, secuencial, fechaEmision } = await this.procesarRetencionCompleta(datos);
+  static async crearRetencionCompleta(datos: WithholdingRequest, companyId: string) {
+    const { empresa, secuencial, fechaEmision } = await this.procesarRetencionCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({

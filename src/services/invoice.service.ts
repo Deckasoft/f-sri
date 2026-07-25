@@ -6,6 +6,7 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, RespuestaSRI, Autorizaci
 import { generateInvoicePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
 import Invoice from '../models/Invoice';
 import InvoiceDetail from '../models/InvoiceDetail';
 import InvoicePDF from '../models/InvoicePDF';
@@ -30,24 +31,15 @@ export class InvoiceService {
   }
 
   /**
-   * Genera el siguiente secuencial para una empresa
+   * Genera el siguiente secuencial para una empresa (codDoc '01' - factura).
+   *
+   * Delega en un contador atómico compartido (src/utils/sequence.utils.ts)
+   * en vez del antiguo enfoque de "leer el secuencial más alto existente y
+   * sumar 1", que podía asignar el mismo secuencial dos veces bajo peticiones
+   * concurrentes para el mismo tenant.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaFactura = await Invoice.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaFactura) {
-      const siguiente = parseInt(ultimaFactura.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '01');
   }
 
   /**
@@ -59,7 +51,8 @@ export class InvoiceService {
   }
 
   /**
-   * Busca una empresa emisora por su RUC.
+   * Busca una empresa emisora por su id (el tenant autenticado vía API key,
+   * nunca un valor tomado del cuerpo de la petición).
    *
    * El certificado y su contraseña (cifrados en reposo) están marcados como
    * `select: false` en el esquema, así que se incluyen explícitamente aquí:
@@ -68,35 +61,64 @@ export class InvoiceService {
    * comportamiento anterior, esta función ya NO materializa el certificado en
    * un archivo temporal: eso ocurre únicamente dentro de procesarEnvioSRI,
    * justo antes de firmar, a través de withCompanyP12.
+   *
+   * IMPORTANTE (Phase 3): antes, esta función resolvía la empresa emisora a
+   * partir del RUC enviado en el cuerpo de la petición — lo que permitía que
+   * cualquier llamador autenticado emitiera un comprobante como CUALQUIER
+   * empresa registrada, usando su certificado real. Ahora resuelve
+   * exclusivamente por el companyId del tenant autenticado; ver
+   * resolveEmpresaAutenticada para la validación cruzada del RUC del cuerpo.
    */
-  static async buscarIssuingCompany(ruc: string): Promise<IIssuingCompany | null> {
-    return IssuingCompany.findOne({ ruc }).select('+certificate +certificate_password');
+  static async buscarIssuingCompany(companyId: string): Promise<IIssuingCompany | null> {
+    return IssuingCompany.findById(companyId).select('+certificate +certificate_password');
   }
 
   /**
-   * Busca un cliente por su identificación
+   * Resuelve la empresa emisora autenticada y valida que el RUC declarado en
+   * el cuerpo del comprobante coincida con el de esa empresa. El RUC del
+   * cuerpo sigue siendo obligatorio (el esquema XML del SRI lo requiere),
+   * pero ya no se usa para *seleccionar* qué empresa firma: solo para
+   * confirmar que coincide con el tenant autenticado. Un mismatch es un
+   * error de validación (400), no un error de servidor.
    */
-  static async buscarClient(identificacion: string): Promise<IClient | null> {
-    const cliente = await Client.findOne({ identificacion });
+  static async resolveEmpresaAutenticada(ruc: string, companyId: string): Promise<IIssuingCompany> {
+    const empresa = await this.buscarIssuingCompany(companyId);
+    if (!empresa) {
+      throw new Error('Empresa emisora no encontrada');
+    }
+
+    if (ruc !== empresa.ruc) {
+      throw new Error('El RUC del comprobante no coincide con la empresa autenticada');
+    }
+
+    return empresa;
+  }
+
+  /**
+   * Busca un cliente por su identificación, dentro del tenant autenticado
+   */
+  static async buscarClient(identificacion: string, companyId: string): Promise<IClient | null> {
+    const cliente = await Client.findOne({ identificacion, empresa_emisora_id: companyId });
     return cliente;
   }
 
   /**
-   * Busca un producto por su código
+   * Busca un producto por su código, dentro del tenant autenticado
    */
-  static async buscarProduct(codigo: string): Promise<IProduct | null> {
-    const producto = await Product.findOne({ codigo });
+  static async buscarProduct(codigo: string, companyId: string): Promise<IProduct | null> {
+    const producto = await Product.findOne({ codigo, empresa_emisora_id: companyId });
     return producto;
   }
 
   /**
-   * Busca todos los productos listados en los detalles de una factura
+   * Busca todos los productos listados en los detalles de una factura,
+   * dentro del tenant autenticado
    */
-  static async buscarProducts(detalles: ProductDetail[]): Promise<IProduct[]> {
+  static async buscarProducts(detalles: ProductDetail[], companyId: string): Promise<IProduct[]> {
     const productos = [];
     for (const det of detalles) {
       const codigo = det.detalle?.codigoPrincipal;
-      const producto = await this.buscarProduct(codigo);
+      const producto = await this.buscarProduct(codigo, companyId);
       if (!producto) {
         throw new Error(`Product not found: ${codigo}`);
       }
@@ -154,7 +176,7 @@ export class InvoiceService {
   /**
    * Procesa la creación completa de una factura y sus detalles
    */
-  static async procesarFacturaCompleta(datosFactura: InvoiceRequest) {
+  static async procesarFacturaCompleta(datosFactura: InvoiceRequest, companyId: string) {
     if (!this.validarDatosFactura(datosFactura)) {
       throw new Error('Datos de factura inválidos o incompletos');
     }
@@ -164,18 +186,15 @@ export class InvoiceService {
       throw new Error('Identification type not found');
     }
 
-    const empresa = await this.buscarIssuingCompany(datosFactura.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await this.resolveEmpresaAutenticada(datosFactura.infoTributaria.ruc, companyId);
 
-    const cliente = await this.buscarClient(datosFactura.infoFactura.identificacionComprador);
+    const cliente = await this.buscarClient(datosFactura.infoFactura.identificacionComprador, companyId);
     if (!cliente) {
       throw new Error('Client not found');
     }
 
-    const productos = await this.buscarProducts(datosFactura.detalles);
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const productos = await this.buscarProducts(datosFactura.detalles, companyId);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datosFactura.infoFactura.fechaEmision);
 
     if (isNaN(fechaEmision.getTime())) {
@@ -194,10 +213,14 @@ export class InvoiceService {
   /**
    * Procesa y guarda una factura completa con todos sus detalles
    * @param datosFactura Los datos de la factura recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns La factura creada y sus detalles
    */
-  static async crearFacturaCompleta(datosFactura: InvoiceRequest) {
-    const { empresa, cliente, productos, secuencial, fechaEmision } = await this.procesarFacturaCompleta(datosFactura);
+  static async crearFacturaCompleta(datosFactura: InvoiceRequest, companyId: string) {
+    const { empresa, cliente, productos, secuencial, fechaEmision } = await this.procesarFacturaCompleta(
+      datosFactura,
+      companyId,
+    );
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({

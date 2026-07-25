@@ -7,9 +7,9 @@ import { generateDeliveryNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
 import DeliveryNote from '../models/DeliveryNote';
 import DeliveryNotePDF from '../models/DeliveryNotePDF';
-import IssuingCompany from '../models/IssuingCompany';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con guías de remisión (codDoc 06)
@@ -34,39 +34,23 @@ export class DeliveryNoteService {
 
   /**
    * Genera el siguiente secuencial de guía de remisión para una empresa
+   * (codDoc '06'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaGuia = await DeliveryNote.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaGuia) {
-      const siguiente = parseInt(ultimaGuia.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '06');
   }
 
   /**
    * Valida y resuelve todas las entidades necesarias para emitir la guía de remisión
    */
-  static async procesarGuiaRemisionCompleta(datos: DeliveryNoteRequest) {
+  static async procesarGuiaRemisionCompleta(datos: DeliveryNoteRequest, companyId: string) {
     if (!this.validarDatosGuiaRemision(datos)) {
       throw new Error('Datos de guía de remisión inválidos o incompletos');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoGuiaRemision.fechaEmision);
     const fechaIniTransporte = convertirFecha(datos.infoGuiaRemision.fechaIniTransporte);
     const fechaFinTransporte = convertirFecha(datos.infoGuiaRemision.fechaFinTransporte);
@@ -88,11 +72,12 @@ export class DeliveryNoteService {
    * Procesa y guarda una guía de remisión completa,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos de la guía de remisión recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns La guía de remisión creada
    */
-  static async crearGuiaRemisionCompleta(datos: DeliveryNoteRequest) {
+  static async crearGuiaRemisionCompleta(datos: DeliveryNoteRequest, companyId: string) {
     const { empresa, secuencial, fechaEmision, fechaIniTransporte, fechaFinTransporte } =
-      await this.procesarGuiaRemisionCompleta(datos);
+      await this.procesarGuiaRemisionCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({
