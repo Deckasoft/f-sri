@@ -1,6 +1,16 @@
 # 📁 Sistema de Almacenamiento de PDFs
 
-Este documento explica el nuevo sistema de almacenamiento de PDFs con soporte para múltiples proveedores.
+Este documento explica el sistema de almacenamiento de PDFs con soporte para múltiples proveedores.
+
+> ⚠️ **Nota (vigente)**: este documento describe el diseño original de la
+> arquitectura de almacenamiento. Desde entonces, **AWS S3 se implementó y es
+> el proveedor recomendado en producción** (`PDF_STORAGE_PROVIDER=s3`,
+> `src/services/storage/s3.storage.ts`) — bucket privado, descargas vía URL
+> presignada — y ya no es "Próximamente". Cloudinary y Local siguen
+> disponibles como alternativas/fallback de desarrollo. Ver `.env.example` y
+> `README.md` para la configuración vigente; las secciones de abajo que
+> hablan de S3 como "no implementado" quedan como referencia histórica del
+> diseño, no como estado actual.
 
 ## 🎯 Problema que Resuelve
 

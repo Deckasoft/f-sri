@@ -11,11 +11,12 @@ Este directorio contiene los workflows de GitHub Actions para el proyecto de fac
 ### Jobs
 
 #### 1. **Test** 
-- ✅ Se ejecuta en **Node.js 18.x y 20.x**
+- ✅ Se ejecuta en **Node.js 20.x** (matriz de una sola versión — Node 18 es
+  EOL y `package.json` ya declara `engines.node >= 20.0.0`)
 - 🔍 **Type checking** con TypeScript
 - 🎨 **Linting** con Prettier
 - 🧪 **Tests con coverage** usando Jest
-- 📊 **Upload coverage** a Codecov (solo Node 20.x)
+- 📊 **Upload coverage** a Codecov
 
 #### 2. **Build**
 - 🏗️ Se ejecuta **solo en rama main**
@@ -46,13 +47,11 @@ npm run lint:fix
 
 ## 🎯 Coverage Thresholds
 
-Actualmente configurado para desarrollo:
-- **Statements**: 40%
-- **Branches**: 20%
-- **Functions**: 35%
-- **Lines**: 40%
-
-*Nota: Estos umbrales se incrementarán conforme se agreguen más tests.*
+Configurado en `jest.config.js` (`coverageThreshold.global`):
+- **Statements**: 85%
+- **Branches**: 70%
+- **Functions**: 90%
+- **Lines**: 85%
 
 ## 🔧 Configuración Local
 
@@ -73,28 +72,27 @@ Para que el workflow funcione correctamente:
    npm run test:coverage
    ```
 
-## 🚫 Deploy Blocking
+## 🚫 Qué bloquea el pipeline
 
-El sistema está configurado para **bloquear deploys** si:
+El job `docker` (build + push a GHCR) requiere que el job `test` termine
+exitosamente primero — un push a `main` con tests, lint, tipos o coverage en
+rojo no llega a construir/publicar una imagen nueva:
 - ❌ Los tests fallan
-- ❌ El linting falla  
+- ❌ El linting falla
 - ❌ La compilación TypeScript falla
 - ❌ El coverage está por debajo del umbral
 
-## 🔗 Integración con Hosting
+Esto no bloquea un *deploy* automáticamente (no hay uno automatizado — ver
+sección anterior), pero sí evita publicar una imagen rota en GHCR.
 
-Para habilitar la opción **"Wait for GitHub checks to pass before deploy"** en tu plataforma de hosting:
+## 🔗 Build e Imagen Docker
 
-1. ✅ Este workflow debe estar en la rama `main`
-2. ✅ Debe ejecutarse exitosamente al menos una vez
-3. ✅ En la plataforma de hosting, habilitar la opción de esperar por checks
-
-### Plataformas Soportadas
-- Vercel
-- Netlify  
-- Railway
-- Render
-- Heroku (con GitHub integration)
+El despliegue actual es Docker + VPS (ver `DEPLOYMENT.md`), no una plataforma
+PaaS con auto-deploy vía checks de GitHub. El workflow de CI construye y
+publica la imagen Docker a GitHub Container Registry (GHCR) — ver el job
+correspondiente en `ci.yml`. El `docker compose pull && up -d` en el VPS (o el
+paso equivalente de tu pipeline de despliegue) es responsabilidad de quien
+opera el VPS, no de este workflow.
 
 ## 📈 Métricas
 
