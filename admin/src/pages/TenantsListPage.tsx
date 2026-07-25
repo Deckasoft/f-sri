@@ -1,9 +1,9 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { createTenant, listTenants } from '../api/adminApi';
 import { ApiError } from '../api/client';
 import type { Tenant } from '../api/types';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import {
   TESTID_NEW_TENANT_FORM,
   TESTID_NEW_TENANT_NOMBRE_COMERCIAL,
@@ -27,7 +27,7 @@ export const TenantsListPage = () => {
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
-  const loadTenants = (): void => {
+  const loadTenants = useCallback((): void => {
     setLoading(true);
     listTenants(token)
       .then(setTenants)
@@ -35,13 +35,11 @@ export const TenantsListPage = () => {
         setLoadError(err instanceof ApiError ? err.message : 'Error al cargar tenants'),
       )
       .finally(() => setLoading(false));
-  };
+  }, [token]);
 
-  // Intentional: load once on mount only (empty deps) — loadTenants is
-  // re-created every render but always closes over the current `token`.
   useEffect(() => {
     loadTenants();
-  }, []);
+  }, [loadTenants]);
 
   const handleCreate = (event: FormEvent<HTMLFormElement>): void => {
     event.preventDefault();

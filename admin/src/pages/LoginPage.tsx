@@ -2,7 +2,7 @@ import { useState, type FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { login } from '../api/adminApi';
 import { ApiError } from '../api/client';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import {
   TESTID_LOGIN_EMAIL,
   TESTID_LOGIN_ERROR,

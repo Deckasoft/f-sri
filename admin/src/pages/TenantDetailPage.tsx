@@ -15,7 +15,7 @@ import {
 import { ApiError } from '../api/client';
 import type { ApiKeyItem, InviteItem, Tenant, TenantProfileInput, UsageRow } from '../api/types';
 import { ShowOnceSecret } from '../components/ShowOnceSecret';
-import { useAuth } from '../context/AuthContext';
+import { useAuth } from '../context/useAuth';
 import {
   TESTID_API_KEY_CREATE_BUTTON,
   TESTID_API_KEY_LIST,
@@ -80,36 +80,74 @@ export const TenantDetailPage = () => {
   const [inviteError, setInviteError] = useState<string | null>(null);
   const [revealedInvite, setRevealedInvite] = useState<RevealedInvite | null>(null);
 
+  const [usageError, setUsageError] = useState<string | null>(null);
+
+  // `isStale` is checked before every setState below: navigating between
+  // tenants (id changes) re-runs this effect, and without the check a
+  // slower response for the PREVIOUS tenant could resolve after a faster
+  // response for the new one and overwrite it with the wrong tenant's data.
   const load = useCallback(
-    (tenantId: string): void => {
+    (tenantId: string, isStale: () => boolean): void => {
       getTenant(token, tenantId)
         .then((data) => {
+          if (isStale()) return;
           setTenant(data);
           setProfile(toProfileInput(data));
         })
-        .catch((err: unknown) =>
-          setLoadError(err instanceof ApiError ? err.message : 'Error al cargar el tenant'),
-        );
+        .catch((err: unknown) => {
+          if (isStale()) return;
+          setLoadError(err instanceof ApiError ? err.message : 'Error al cargar el tenant');
+        });
 
       listApiKeys(token, tenantId)
-        .then(setApiKeys)
-        .catch(() => undefined);
+        .then((data) => {
+          if (isStale()) return;
+          setApiKeys(data);
+          setKeyError(null);
+        })
+        .catch((err: unknown) => {
+          if (isStale()) return;
+          setKeyError(
+            err instanceof ApiError ? err.message : 'No se pudieron cargar las claves de API',
+          );
+        });
 
       listInvites(token, tenantId)
-        .then(setInvites)
-        .catch(() => undefined);
+        .then((data) => {
+          if (isStale()) return;
+          setInvites(data);
+          setInviteError(null);
+        })
+        .catch((err: unknown) => {
+          if (isStale()) return;
+          setInviteError(
+            err instanceof ApiError ? err.message : 'No se pudieron cargar las invitaciones',
+          );
+        });
 
       getTenantUsage(token, tenantId)
-        .then(setUsage)
-        .catch(() => undefined);
+        .then((data) => {
+          if (isStale()) return;
+          setUsage(data);
+          setUsageError(null);
+        })
+        .catch((err: unknown) => {
+          if (isStale()) return;
+          setUsageError(err instanceof ApiError ? err.message : 'No se pudo cargar el uso');
+        });
     },
     [token],
   );
 
   useEffect(() => {
-    if (id) {
-      load(id);
+    if (!id) {
+      return;
     }
+    let stale = false;
+    load(id, () => stale);
+    return () => {
+      stale = true;
+    };
   }, [id, load]);
 
   if (!id) {
@@ -414,7 +452,9 @@ export const TenantDetailPage = () => {
 
           <section className="card">
             <h2>Uso</h2>
-            {usage.length === 0 ? (
+            {usageError ? (
+              <p className="error-text">{usageError}</p>
+            ) : usage.length === 0 ? (
               <p>Sin actividad registrada todavía.</p>
             ) : (
               <table className="table">

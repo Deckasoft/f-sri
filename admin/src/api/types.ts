@@ -43,13 +43,13 @@ export const tenantProfileSchema = z.object({
   direccion_matriz: z.string().optional(),
   direccion_establecimiento: z.string().optional(),
   telefono: z.string().optional(),
-  email: z.string().email().optional().or(z.literal('')),
+  email: z.email().optional().or(z.literal('')),
   codigo_establecimiento: z.string().optional(),
   punto_emision: z.string().optional(),
   tipo_ambiente: z.union([z.literal(1), z.literal(2)]).optional(),
   obligado_contabilidad: z.boolean().optional(),
   contribuyente_especial: z.string().optional(),
-  email_notificacion: z.string().email().optional().or(z.literal('')),
+  email_notificacion: z.email().optional().or(z.literal('')),
 });
 export type TenantProfileInput = z.infer<typeof tenantProfileSchema>;
 

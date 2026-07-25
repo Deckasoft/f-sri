@@ -1,23 +1,6 @@
-import { createContext, useCallback, useContext, useMemo, useState, type ReactNode } from 'react';
-
-export interface AdminUser {
-  id: string;
-  email: string;
-  role: string;
-}
-
-export interface AuthState {
-  token: string;
-  user: AdminUser;
-}
-
-interface AuthContextValue {
-  auth: AuthState | null;
-  setAuth: (auth: AuthState) => void;
-  logout: () => void;
-}
-
-const AuthContext = createContext<AuthContextValue | undefined>(undefined);
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
+import { setUnauthorizedListener } from '../api/client';
+import { AuthContext, type AuthState } from './AuthContext';
 
 /**
  * Holds the admin JWT in memory only (React state) — deliberately NOT
@@ -25,6 +8,12 @@ const AuthContext = createContext<AuthContextValue | undefined>(undefined);
  * internal Deckasoft staff tool: a page refresh forcing re-login is an
  * acceptable trade-off for not leaving a bearer token sitting in persistent
  * browser storage.
+ *
+ * Also registers itself as the app's single unauthorized-response listener
+ * (see api/client.ts's setUnauthorizedListener): whenever any apiRequest
+ * call gets a 401 (the 4-day admin JWT expired, or was otherwise rejected),
+ * logout() runs so ProtectedRoute redirects back to /admin/login instead of
+ * leaving every page permanently stuck on a generic load-failure message.
  */
 export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const [auth, setAuthState] = useState<AuthState | null>(null);
@@ -37,15 +26,12 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
     setAuthState(null);
   }, []);
 
+  useEffect(() => {
+    setUnauthorizedListener(logout);
+    return () => setUnauthorizedListener(null);
+  }, [logout]);
+
   const value = useMemo(() => ({ auth, setAuth, logout }), [auth, setAuth, logout]);
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
-};
-
-export const useAuth = (): AuthContextValue => {
-  const context = useContext(AuthContext);
-  if (!context) {
-    throw new Error('useAuth must be used within an AuthProvider');
-  }
-  return context;
 };

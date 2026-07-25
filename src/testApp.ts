@@ -21,7 +21,23 @@ import { apiKeyAuth } from './middleware/apiKeyAuth';
 import { adminAuth } from './middleware/adminAuth';
 import { mountSpaFallback } from './staticSpa';
 
-export const createApp = () => {
+export interface CreateAppOptions {
+  /**
+   * Overrides the directory mountSpaFallback serves the SPA from. Test-only
+   * escape hatch: __tests__/staticSpa.test.ts points this at a temp fixture
+   * directory (built with fs.mkdtempSync) so it can assert the *real*
+   * app.ts registration order — API routers registered before the SPA
+   * fallback — actually holds even when the fallback has something to
+   * serve, without depending on `admin/` having been built. Omitted (the
+   * normal case, every other test file), this defaults to the same
+   * `admin/dist` path src/index.ts uses, which is absent on a fresh
+   * checkout/in CI, so mountSpaFallback no-ops exactly as it does in
+   * production before the SPA is built.
+   */
+  adminDistDir?: string;
+}
+
+export const createApp = (options: CreateAppOptions = {}) => {
   // Mirrors index.ts: fail fast on missing/invalid env vars before wiring the app.
   loadEnv();
 
@@ -48,16 +64,16 @@ export const createApp = () => {
 
   // Mirrors index.ts: wires the same SPA-serving path-precedence logic into
   // the test app factory so it's exercised by the same code every other
-  // route test runs against. This is a deliberate no-op in the normal test
-  // run: admin/dist is gitignored Vite build output, so
-  // mountSpaFallback(...) finds no index.html and mounts nothing — the 493
-  // pre-existing tests are unaffected either way. See src/staticSpa.ts and
-  // __tests__/staticSpa.test.ts (which builds a temp fixture dist/ to
-  // exercise the fallback behavior directly, without depending on admin/
-  // actually being built).
-  const ADMIN_DIST_DIR = path.join(__dirname, '..', 'admin', 'dist');
-  mountSpaFallback(app, '/admin', ADMIN_DIST_DIR);
-  mountSpaFallback(app, '/onboarding', ADMIN_DIST_DIR);
+  // route test runs against. In the normal test run (no adminDistDir
+  // override) this is a deliberate no-op: admin/dist is gitignored Vite
+  // build output, so mountSpaFallback(...) finds no index.html and mounts
+  // nothing — the rest of the suite is unaffected either way. See
+  // src/staticSpa.ts and __tests__/staticSpa.test.ts, which passes
+  // adminDistDir pointed at a temp fixture to verify the registration order
+  // below actually holds once the fallback has something to serve.
+  const adminDistDir = options.adminDistDir ?? path.join(__dirname, '..', 'admin', 'dist');
+  mountSpaFallback(app, '/admin', adminDistDir);
+  mountSpaFallback(app, '/onboarding', adminDistDir);
 
   return app;
 };

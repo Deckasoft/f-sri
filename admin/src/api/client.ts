@@ -12,6 +12,21 @@ export class ApiError extends Error {
 
 const errorBodySchema = z.object({ message: z.string() }).partial();
 
+type UnauthorizedListener = () => void;
+let unauthorizedListener: UnauthorizedListener | null = null;
+
+/**
+ * Registers the single app-wide callback invoked whenever any apiRequest
+ * call receives a 401 (an expired or otherwise invalid admin JWT) — set by
+ * AuthProvider (context/AuthProvider.tsx) so a stale session forces
+ * ProtectedRoute back to /admin/login instead of leaving every page stuck
+ * showing a generic load-failure error indefinitely. Pass `null` to
+ * unregister (e.g. on unmount).
+ */
+export const setUnauthorizedListener = (listener: UnauthorizedListener | null): void => {
+  unauthorizedListener = listener;
+};
+
 const parseJsonSafely = async (response: Response): Promise<unknown> => {
   const text = await response.text();
   if (!text) {
@@ -46,6 +61,9 @@ export const apiRequest = async <T>(
   const body = await parseJsonSafely(response);
 
   if (!response.ok) {
+    if (response.status === 401) {
+      unauthorizedListener?.();
+    }
     const parsedError = errorBodySchema.safeParse(body);
     const message =
       parsedError.success && parsedError.data.message

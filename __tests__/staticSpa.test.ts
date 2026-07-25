@@ -125,14 +125,57 @@ describe('mountSpaFallback', () => {
 });
 
 describe('SPA static serving does not shadow real API routes (src/testApp.ts wiring)', () => {
+  // Deliberately does NOT rely on admin/dist existing (it's gitignored build
+  // output, absent on a fresh checkout and in CI) — a temp fixture dist/ is
+  // passed to createApp() via its adminDistDir test override (see
+  // src/testApp.ts's CreateAppOptions) so the SPA fallback is GENUINELY
+  // mounted and serving content here. Before this fixture was added, this
+  // whole describe block ran against the real (absent) admin/dist path, so
+  // mountSpaFallback silently mounted nothing and every assertion here
+  // passed vacuously regardless of whether src/testApp.ts's wiring was
+  // correct — confirmed experimentally (moving admin/dist aside locally
+  // changed nothing). The "sanity check" test below proves the fallback is
+  // actually active this time; the rest confirm the real admin/onboarding
+  // API routers in createApp() still answer in JSON with that fallback
+  // genuinely in place — guarding against those routers being dropped,
+  // misconfigured, or otherwise stopping short (verified by temporarily
+  // deleting the adminAuth/adminRoutes lines from testApp.ts during this
+  // fix: these assertions promptly failed — 404/text-html instead of
+  // 401/application-json — rather than silently passing).
+  //
+  // Note on mount ORDER specifically: src/staticSpa.ts's mountSpaFallback
+  // has its own internal guard (any sub-path starting with "/api" always
+  // calls next() rather than serving the SPA shell), which makes the
+  // /admin/api/* vs /admin-SPA precedence outcome independent of whether
+  // mountSpaFallback is registered before or after the API routers for this
+  // app's route topology (verified experimentally too — reordering it
+  // earlier did not change any result here). That guard, not registration
+  // order, is what actually protects this precedence; order is still kept
+  // API-routers-first in src/index.ts/testApp.ts as the clearer, more
+  // conventional structure.
+  const fixtureDistDir = fs.mkdtempSync(path.join(os.tmpdir(), 'f-sri-real-app-spa-test-'));
+  fs.writeFileSync(path.join(fixtureDistDir, 'index.html'), '<!doctype html><title>SPA</title><body>spa-shell</body>');
+
+  afterAll(() => {
+    fs.rmSync(fixtureDistDir, { recursive: true, force: true });
+  });
+
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { createApp } = require('../src/testApp');
-  const app = createApp();
+  const app = createApp({ adminDistDir: fixtureDistDir });
+
+  it('sanity check: the SPA fallback is genuinely mounted (non-api /admin route gets the fixture shell)', async () => {
+    const res = await request(app).get('/admin/some-client-side-route');
+    expect(res.status).toBe(200);
+    expect(res.type).toBe('text/html');
+    expect(res.text).toContain('spa-shell');
+  });
 
   it('GET /admin/api/tenants still hits the admin API and returns 401 JSON without a token', async () => {
     const res = await request(app).get('/admin/api/tenants');
     expect(res.status).toBe(401);
     expect(res.type).toBe('application/json');
+    expect(res.text).not.toContain('spa-shell');
   });
 
   it('GET /admin/api/tenants returns JSON (not the SPA shell) with a valid admin JWT too', async () => {
@@ -141,12 +184,21 @@ describe('SPA static serving does not shadow real API routes (src/testApp.ts wir
     });
     const res = await request(app).get('/admin/api/tenants').set('Authorization', `Bearer ${token}`);
     // No Mongo connection in this suite — what matters is that the response
-    // is JSON from the API layer, not HTML from a static/SPA fallback.
+    // is JSON from the API layer, not HTML from the (genuinely mounted) SPA
+    // fallback.
     expect(res.type).toBe('application/json');
+    expect(res.text).not.toContain('spa-shell');
   });
 
-  it('GET /onboarding/api/invite/:token still hits the onboarding API (JSON, not HTML)', async () => {
+  it('GET /onboarding/api/invite/:token still hits the onboarding API (JSON, not the SPA shell)', async () => {
     const res = await request(app).get('/onboarding/api/invite/some-bogus-token');
     expect(res.type).toBe('application/json');
+    expect(res.text).not.toContain('spa-shell');
+  });
+
+  it('GET /onboarding (non-api) gets the SPA shell too, from the same fixture dist dir', async () => {
+    const res = await request(app).get('/onboarding?token=abc123');
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('spa-shell');
   });
 });
