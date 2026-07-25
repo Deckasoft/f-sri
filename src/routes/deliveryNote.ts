@@ -2,12 +2,14 @@ import { Router } from 'express';
 import DeliveryNote from '../models/DeliveryNote';
 import DeliveryNotePDF from '../models/DeliveryNotePDF';
 import { DeliveryNoteService } from '../services/delivery-note.service';
+import { getTenantCompanyId } from '../utils/tenant.utils';
 
 const router = Router();
 
 router.post('/', async (req, res) => {
   try {
-    const doc = new DeliveryNote(req.body);
+    const companyId = getTenantCompanyId(req);
+    const doc = new DeliveryNote({ ...req.body, empresa_emisora_id: companyId });
     await doc.save();
     res.status(201).json(doc);
   } catch (err) {
@@ -24,7 +26,8 @@ router.post('/complete', async (req, res) => {
       });
     }
 
-    const resultado = await DeliveryNoteService.crearGuiaRemisionCompleta(req.body.guia_remision);
+    const companyId = getTenantCompanyId(req);
+    const resultado = await DeliveryNoteService.crearGuiaRemisionCompleta(req.body.guia_remision, companyId);
 
     return res.status(201).json({
       success: true,
@@ -37,6 +40,7 @@ router.post('/complete', async (req, res) => {
       'Empresa emisora no encontrada',
       'Invalid date format',
       'Datos de guía de remisión inválidos o incompletos',
+      'El RUC del comprobante no coincide con la empresa autenticada',
     ];
 
     const isValidationError = validationErrors.some((error) => err.message.includes(error));
@@ -56,9 +60,10 @@ router.post('/complete', async (req, res) => {
   }
 });
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const docs = await DeliveryNote.find();
+    const companyId = getTenantCompanyId(req);
+    const docs = await DeliveryNote.find({ empresa_emisora_id: companyId });
     res.json(docs);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -67,7 +72,8 @@ router.get('/', async (_req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await DeliveryNote.findById(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await DeliveryNote.findOne({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -77,6 +83,10 @@ router.get('/:id', async (req, res) => {
 
 router.get('/:id/pdf', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
+    const parent = await DeliveryNote.findOne({ _id: req.params.id, empresa_emisora_id: companyId });
+    if (!parent) return res.status(404).json({ message: 'Not found' });
+
     const doc = await DeliveryNotePDF.findOne({ guia_remision_id: req.params.id });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
@@ -87,7 +97,11 @@ router.get('/:id/pdf', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const doc = await DeliveryNote.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const companyId = getTenantCompanyId(req);
+    const { empresa_emisora_id: _ignoredCompanyId, ...updateData } = req.body;
+    const doc = await DeliveryNote.findOneAndUpdate({ _id: req.params.id, empresa_emisora_id: companyId }, updateData, {
+      new: true,
+    });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -97,7 +111,8 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const doc = await DeliveryNote.findByIdAndDelete(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await DeliveryNote.findOneAndDelete({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json({ message: 'Deleted' });
   } catch (err) {

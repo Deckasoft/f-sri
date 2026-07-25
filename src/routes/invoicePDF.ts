@@ -1,12 +1,23 @@
 import { Router } from 'express';
 import InvoicePDF from '../models/InvoicePDF';
+import Invoice from '../models/Invoice';
+import { getTenantCompanyId } from '../utils/tenant.utils';
 
 const router = Router();
 
-// Get all invoice PDFs
-router.get('/', async (_req, res) => {
+// InvoicePDF carries no tenant field of its own — it's keyed by factura_id
+// (ref Invoice) or, on some endpoints, only by claveAcceso. Every endpoint
+// here scopes access by confirming the referenced Invoice belongs to the
+// authenticated tenant before returning or mutating anything.
+
+// Get all invoice PDFs (scoped to the tenant's own invoices)
+router.get('/', async (req, res) => {
   try {
-    const docs = await InvoicePDF.find().populate('factura_id');
+    const companyId = getTenantCompanyId(req);
+    const facturaIds = await Invoice.find({ empresa_emisora_id: companyId }).distinct('_id');
+    const docs = await InvoicePDF.find({ factura_id: { $in: facturaIds.map((id) => String(id)) } }).populate(
+      'factura_id',
+    );
     res.json(docs);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -16,6 +27,10 @@ router.get('/', async (_req, res) => {
 // Get PDF by invoice ID
 router.get('/invoice/:facturaId', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
+    const factura = await Invoice.findOne({ _id: req.params.facturaId, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'PDF not found' });
+
     const doc = await InvoicePDF.findOne({ factura_id: req.params.facturaId });
     if (!doc) return res.status(404).json({ message: 'PDF not found' });
     res.json(doc);
@@ -24,11 +39,17 @@ router.get('/invoice/:facturaId', async (req, res) => {
   }
 });
 
-// Get PDF by access key
+// Get PDF by access key — no factura_id in the URL, so the PDF is looked up
+// first and its owning invoice is verified before returning anything.
 router.get('/access-key/:claveAcceso', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
     const doc = await InvoicePDF.findOne({ claveAcceso: req.params.claveAcceso });
     if (!doc) return res.status(404).json({ message: 'PDF not found' });
+
+    const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'PDF not found' });
+
     res.json(doc);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -39,8 +60,12 @@ router.get('/access-key/:claveAcceso', async (req, res) => {
 // Redirige a la URL pública del PDF (Cloudinary, local storage, etc.)
 router.get('/download/:claveAcceso', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
     const doc = await InvoicePDF.findOne({ claveAcceso: req.params.claveAcceso });
     if (!doc) return res.status(404).json({ message: 'PDF not found' });
+
+    const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'PDF not found' });
 
     if (doc.pdf_url) {
       // Redirigir a la URL pública del PDF
@@ -56,6 +81,10 @@ router.get('/download/:claveAcceso', async (req, res) => {
 // Regenerate PDF for a specific invoice
 router.post('/regenerate/:facturaId', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
+    const factura = await Invoice.findOne({ _id: req.params.facturaId, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'Invoice not found' });
+
     // This would trigger PDF regeneration
     // For now, just return a message
     res.json({ message: 'PDF regeneration requested', facturaId: req.params.facturaId });
@@ -73,8 +102,12 @@ router.post('/send-email/:claveAcceso', async (req, res) => {
       return res.status(400).json({ message: 'Email destinatario is required' });
     }
 
+    const companyId = getTenantCompanyId(req);
     const doc = await InvoicePDF.findOne({ claveAcceso: req.params.claveAcceso });
     if (!doc) return res.status(404).json({ message: 'PDF not found' });
+
+    const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'PDF not found' });
 
     // Update email fields for future implementation
     doc.email_estado = 'PENDIENTE';
@@ -100,8 +133,12 @@ router.post('/send-email/:claveAcceso', async (req, res) => {
 // Get email status for a PDF
 router.get('/email-status/:claveAcceso', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
     const doc = await InvoicePDF.findOne({ claveAcceso: req.params.claveAcceso });
     if (!doc) return res.status(404).json({ message: 'PDF not found' });
+
+    const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'PDF not found' });
 
     res.json({
       claveAcceso: req.params.claveAcceso,
@@ -119,8 +156,12 @@ router.get('/email-status/:claveAcceso', async (req, res) => {
 // Retry email sending
 router.post('/retry-email/:claveAcceso', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
     const doc = await InvoicePDF.findOne({ claveAcceso: req.params.claveAcceso });
     if (!doc) return res.status(404).json({ message: 'PDF not found' });
+
+    const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'PDF not found' });
 
     if (doc.email_estado === 'ENVIADO') {
       return res.status(400).json({ message: 'Email already sent successfully' });

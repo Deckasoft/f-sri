@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import Invoice from '../models/Invoice';
 import { InvoiceService } from '../services/invoice.service';
+import { getTenantCompanyId } from '../utils/tenant.utils';
 
 const router = Router();
 
 router.post('/', async (req, res) => {
   try {
-    const doc = new Invoice(req.body);
+    const companyId = getTenantCompanyId(req);
+    const doc = new Invoice({ ...req.body, empresa_emisora_id: companyId });
     await doc.save();
     res.status(201).json(doc);
   } catch (err) {
@@ -23,7 +25,8 @@ router.post('/complete', async (req, res) => {
       });
     }
 
-    const resultado = await InvoiceService.crearFacturaCompleta(req.body.factura);
+    const companyId = getTenantCompanyId(req);
+    const resultado = await InvoiceService.crearFacturaCompleta(req.body.factura, companyId);
 
     return res.status(201).json({
       success: true,
@@ -39,6 +42,10 @@ router.post('/complete', async (req, res) => {
       'Empresa emisora no encontrada',
       'Invalid date format',
       'Datos de factura inválidos o incompletos',
+      // Body RUC doesn't match the authenticated tenant's RUC (Phase 3):
+      // emission must be bound to the caller's own company, never to a
+      // company selected via the request body.
+      'El RUC del comprobante no coincide con la empresa autenticada',
     ];
 
     const isValidationError = validationErrors.some((error) => err.message.includes(error));
@@ -58,9 +65,10 @@ router.post('/complete', async (req, res) => {
   }
 });
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const docs = await Invoice.find();
+    const companyId = getTenantCompanyId(req);
+    const docs = await Invoice.find({ empresa_emisora_id: companyId });
     res.json(docs);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -69,7 +77,8 @@ router.get('/', async (_req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await Invoice.findById(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await Invoice.findOne({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -79,7 +88,11 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const doc = await Invoice.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const companyId = getTenantCompanyId(req);
+    const { empresa_emisora_id: _ignoredCompanyId, ...updateData } = req.body;
+    const doc = await Invoice.findOneAndUpdate({ _id: req.params.id, empresa_emisora_id: companyId }, updateData, {
+      new: true,
+    });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -89,7 +102,8 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const doc = await Invoice.findByIdAndDelete(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await Invoice.findOneAndDelete({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json({ message: 'Deleted' });
   } catch (err) {
