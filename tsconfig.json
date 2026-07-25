@@ -12,5 +12,10 @@
     "skipLibCheck": true,
     "types": ["jest", "node"]
   },
-  "exclude": ["node_modules", "dist"]
+  // admin/ is a separate npm package (its own Vite + React + TS project,
+  // config, and tsconfig) — see admin/README-less setup in admin/tsconfig*.json.
+  // It must stay out of the backend's typecheck: JSX/DOM types aren't part
+  // of this project's `types` (["jest", "node"]), and admin/ has no
+  // dependency on this tsconfig at all.
+  "exclude": ["node_modules", "dist", "admin"]
 }

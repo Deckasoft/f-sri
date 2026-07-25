@@ -1,4 +1,5 @@
 import dotenv from 'dotenv';
+import path from 'path';
 
 dotenv.config();
 
@@ -34,6 +35,7 @@ import invoicePDFRoutes from './routes/invoicePDF';
 import { apiKeyAuth } from './middleware/apiKeyAuth';
 import { adminAuth } from './middleware/adminAuth';
 import corsErrorHandler from './middleware/corsErrorHandler';
+import { mountSpaFallback } from './staticSpa';
 
 const app = express();
 
@@ -125,6 +127,18 @@ app.use('/onboarding/api', onboardingRoutes);
 app.use('/admin/api/auth', adminAuthRoutes);
 app.use('/admin/api', adminAuth);
 app.use('/admin/api', adminRoutes);
+
+// Backoffice SPA (Phase 6, admin/): the SAME built bundle is served at both
+// /admin (backoffice dashboard) and /onboarding (public onboarding page) —
+// its client-side router handles both path spaces from one Vite build. Must
+// be mounted AFTER the API routers above so /admin/api/* and
+// /onboarding/api/* keep taking precedence; see src/staticSpa.ts for why
+// that ordering is sufficient and what the extra safety check there covers.
+// No-ops if admin/dist hasn't been built (gitignored output) — see
+// src/staticSpa.ts's doc comment.
+const ADMIN_DIST_DIR = path.join(__dirname, '..', 'admin', 'dist');
+mountSpaFallback(app, '/admin', ADMIN_DIST_DIR);
+mountSpaFallback(app, '/onboarding', ADMIN_DIST_DIR);
 
 // Error handling middleware (debe ir al final)
 app.use(corsErrorHandler);
