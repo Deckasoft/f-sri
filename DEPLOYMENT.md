@@ -95,6 +95,50 @@ operativo puntual para esta fase de containerización.
     se conecta a través de `MONGO_URI` en `.env.production` (ver sección 3).
 - **`compose.yml`** (existente) sigue siendo solo para desarrollo local
   (mongo + mongo-express con credenciales de prueba). No usarlo en el VPS.
+- **`compose.local.yml`** levanta el stack completo en tu máquina —
+  **construyendo** la imagen desde el `Dockerfile` local, con su propio
+  mongo — para probar el artefacto real antes de desplegarlo. Ver sección
+  1.1. Tampoco usarlo en el VPS.
+
+### 1.1 Probar el stack completo localmente (antes de desplegar)
+
+`npm run dev` ejecuta el código sobre Node en el host, así que no ejerce
+nada de lo que aporta la imagen: usuario no-root, `create-admin`
+precompilado, la SPA de admin empaquetada, ni las dependencias de Chromium.
+`compose.local.yml` sí, porque construye y corre esa misma imagen:
+
+```bash
+cp .env.example .env.local     # editar: ver las 4 variables de la sección 3
+docker compose -f compose.local.yml up -d --build
+
+# Crear el primer admin DENTRO del contenedor (binario precompilado, sin ts-node)
+docker compose -f compose.local.yml exec api \
+  node dist-scripts/scripts/create-admin.js admin@example.test 'ChangeMe123!'
+
+open http://localhost:3000/admin      # backoffice
+open http://localhost:3000/docs       # Swagger
+
+docker compose -f compose.local.yml down -v   # -v borra también los datos
+```
+
+En `.env.local`, `MONGO_URI` debe apuntar al servicio de compose, no a
+localhost: `mongodb://root:example@mongo:27017/f-sri-local?authSource=admin`.
+`PDF_STORAGE_PROVIDER=local` evita necesitar credenciales de AWS, y si se
+deja `RESEND_API_KEY` sin definir el envío de emails se degrada
+silenciosamente en vez de fallar. `.env.local` está en `.gitignore`.
+
+Este stack **no publica el puerto de mongo**, así que convive sin conflicto
+con cualquier MongoDB que ya tengas escuchando en el 27017 del host (por
+ejemplo el de `compose.yml`) — no hace falta pararlo. Tampoco incluye Caddy:
+su HTTPS automático necesita un dominio público real, así que en local se
+publica el puerto de la API directamente.
+
+> ⚠️ **Apple Silicon / ARM**: el servicio `api` fija `platform: linux/amd64`
+> a propósito. No quitarlo: una build nativa arm64 produce una imagen cuyo
+> Chromium no arranca (no existe build oficial de Chrome-for-Testing para
+> Linux ARM64), con lo que la generación de PDFs falla en runtime aunque
+> todo lo demás parezca sano. Corre emulado, así que la primera build tarda
+> varios minutos.
 
 ## 2. Prerrequisitos
 

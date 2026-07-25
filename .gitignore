@@ -7,6 +7,10 @@ dist/
 dist-scripts/
 .env
 .env.production
+# Used by compose.local.yml. NOT covered by `.env.*.local` below (that pattern
+# needs a middle segment, e.g. .env.foo.local), so it needs its own entry —
+# without it a local stack's real secrets would be committable.
+.env.local
 .env.*.local
 coverage/
 *.log
