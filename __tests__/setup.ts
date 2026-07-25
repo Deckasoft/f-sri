@@ -10,6 +10,7 @@ process.env.JWT_SECRET = 'test_jwt_secret_key_for_testing';
 // Generado en tiempo de ejecución (no hardcodeado) para evitar falsos positivos de escaneo de secretos
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
 process.env.MONGO_URI = 'mongodb://localhost:27017/veronica_test';
+process.env.PUBLIC_URL = 'http://localhost:3000';
 
 // Global mocks for CI environment
 if (process.env.CI) {

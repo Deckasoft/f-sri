@@ -13,6 +13,7 @@ describe('env.config', () => {
     expect(env.JWT_SECRET).toBe(process.env.JWT_SECRET);
     expect(env.ENCRYPTION_KEY).toBe(process.env.ENCRYPTION_KEY);
     expect(env.MONGO_URI).toBe(process.env.MONGO_URI);
+    expect(env.PUBLIC_URL).toBe(process.env.PUBLIC_URL);
   });
 
   it('fails fast when JWT_SECRET is missing (the empty-string fallback bug this replaces)', () => {
@@ -31,5 +32,17 @@ describe('env.config', () => {
     delete process.env.MONGO_URI;
 
     expect(() => loadEnv()).toThrow(/MONGO_URI/);
+  });
+
+  it('fails fast when PUBLIC_URL is missing', () => {
+    delete process.env.PUBLIC_URL;
+
+    expect(() => loadEnv()).toThrow(/PUBLIC_URL/);
+  });
+
+  it('fails fast when PUBLIC_URL is not a valid URL', () => {
+    process.env.PUBLIC_URL = 'not-a-url';
+
+    expect(() => loadEnv()).toThrow(/PUBLIC_URL/);
   });
 });

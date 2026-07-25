@@ -13,6 +13,13 @@ const envSchema = z.object({
     .string()
     .regex(/^[0-9a-fA-F]{64}$/, 'ENCRYPTION_KEY debe tener 64 caracteres hexadecimales (32 bytes)'),
   MONGO_URI: z.string().min(1, 'MONGO_URI no puede estar vacío'),
+  // Required (not defaulted to localhost) on purpose: it's used to build the
+  // onboarding URL returned in invite-creation responses
+  // (src/routes/admin/invite.ts). Defaulting it would let production silently
+  // hand out localhost invite links instead of failing fast at startup — the
+  // same fail-fast reasoning as the other vars in this schema. Phase 7's
+  // deployment doc lists it as a required production env var for this reason.
+  PUBLIC_URL: z.string().url('PUBLIC_URL debe ser una URL válida (p. ej. https://api.tuempresa.com)'),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -31,6 +38,7 @@ export const loadEnv = (): Env => {
     JWT_SECRET: process.env.JWT_SECRET,
     ENCRYPTION_KEY: process.env.ENCRYPTION_KEY,
     MONGO_URI: process.env.MONGO_URI,
+    PUBLIC_URL: process.env.PUBLIC_URL,
   });
 
   if (!parsed.success) {
