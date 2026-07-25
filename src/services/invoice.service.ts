@@ -8,6 +8,7 @@ import { PDFStorageFactory } from './storage';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import Invoice from '../models/Invoice';
 import InvoiceDetail from '../models/InvoiceDetail';
 import InvoicePDF from '../models/InvoicePDF';
@@ -260,6 +261,14 @@ export class InvoiceService {
     facturaCreada.datos_originales = JSON.stringify(datosFactura);
     await facturaCreada.save();
 
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '01',
+      documentId: String(facturaCreada._id),
+      claveAcceso: facturaCreada.clave_acceso,
+      sriEstado: 'PENDIENTE',
+    });
+
     this.procesarEnvioSRI(facturaCreada, empresa, cliente, productos, datosFactura).catch((error) => {
       console.error('Error in asynchronous SRI sending process:', error);
     });
@@ -297,6 +306,7 @@ export class InvoiceService {
         factura.sri_estado = 'ERROR_FIRMA';
         factura.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await factura.save();
+        recordSriOutcome(factura.clave_acceso, factura.sri_estado);
         return;
       }
 
@@ -329,6 +339,7 @@ export class InvoiceService {
             factura.sri_mensajes = respuestaSRI.mensajes;
           }
           await factura.save();
+          recordSriOutcome(factura.clave_acceso, factura.sri_estado);
 
           if (respuestaSRI.estado === 'RECIBIDA') {
             console.log(
@@ -345,12 +356,14 @@ export class InvoiceService {
         factura.sri_estado = 'ERROR_FIRMA';
         factura.sri_mensajes = { error: error.message };
         await factura.save();
+        recordSriOutcome(factura.clave_acceso, factura.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       factura.sri_estado = 'ERROR_PROCESO';
       factura.sri_mensajes = { error: error.message };
       await factura.save();
+      recordSriOutcome(factura.clave_acceso, factura.sri_estado);
     }
   }
 
@@ -602,6 +615,7 @@ export class InvoiceService {
       }
 
       await factura.save();
+      recordSriOutcome(factura.clave_acceso, factura.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

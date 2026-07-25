@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import DeliveryNote from '../models/DeliveryNote';
 import DeliveryNotePDF from '../models/DeliveryNotePDF';
 
@@ -115,6 +116,14 @@ export class DeliveryNoteService {
 
     await guiaRemision.save();
 
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '06',
+      documentId: String(guiaRemision._id),
+      claveAcceso: guiaRemision.clave_acceso,
+      sriEstado: 'PENDIENTE',
+    });
+
     this.procesarEnvioSRI(guiaRemision, empresa, datos).catch((error) => {
       console.error('Error in asynchronous SRI sending process:', error);
     });
@@ -139,6 +148,7 @@ export class DeliveryNoteService {
         guiaRemision.sri_estado = 'ERROR_FIRMA';
         guiaRemision.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await guiaRemision.save();
+        recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
         return;
       }
 
@@ -164,6 +174,7 @@ export class DeliveryNoteService {
           guiaRemision.sri_mensajes = respuestaSRI.mensajes;
         }
         await guiaRemision.save();
+        recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -179,12 +190,14 @@ export class DeliveryNoteService {
         guiaRemision.sri_estado = 'ERROR_FIRMA';
         guiaRemision.sri_mensajes = { error: error.message };
         await guiaRemision.save();
+        recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       guiaRemision.sri_estado = 'ERROR_PROCESO';
       guiaRemision.sri_mensajes = { error: error.message };
       await guiaRemision.save();
+      recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
     }
   }
 
@@ -243,6 +256,7 @@ export class DeliveryNoteService {
       }
 
       await guiaRemision.save();
+      recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

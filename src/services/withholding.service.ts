@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import Withholding from '../models/Withholding';
 import WithholdingPDF from '../models/WithholdingPDF';
 
@@ -121,6 +122,14 @@ export class WithholdingService {
 
     await retencion.save();
 
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '07',
+      documentId: String(retencion._id),
+      claveAcceso: retencion.clave_acceso,
+      sriEstado: 'PENDIENTE',
+    });
+
     this.procesarEnvioSRI(retencion, empresa, datos).catch((error) => {
       console.error('Error in asynchronous SRI sending process:', error);
     });
@@ -145,6 +154,7 @@ export class WithholdingService {
         retencion.sri_estado = 'ERROR_FIRMA';
         retencion.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await retencion.save();
+        recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
         return;
       }
 
@@ -170,6 +180,7 @@ export class WithholdingService {
           retencion.sri_mensajes = respuestaSRI.mensajes;
         }
         await retencion.save();
+        recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -185,12 +196,14 @@ export class WithholdingService {
         retencion.sri_estado = 'ERROR_FIRMA';
         retencion.sri_mensajes = { error: error.message };
         await retencion.save();
+        recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       retencion.sri_estado = 'ERROR_PROCESO';
       retencion.sri_mensajes = { error: error.message };
       await retencion.save();
+      recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
     }
   }
 
@@ -247,6 +260,7 @@ export class WithholdingService {
       }
 
       await retencion.save();
+      recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

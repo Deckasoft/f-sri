@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import DebitNote from '../models/DebitNote';
 import DebitNotePDF from '../models/DebitNotePDF';
 import Invoice from '../models/Invoice';
@@ -138,6 +139,14 @@ export class DebitNoteService {
 
     await notaDebito.save();
 
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '05',
+      documentId: String(notaDebito._id),
+      claveAcceso: notaDebito.clave_acceso,
+      sriEstado: 'PENDIENTE',
+    });
+
     this.procesarEnvioSRI(notaDebito, empresa, cliente, datos).catch((error) => {
       console.error('Error in asynchronous SRI sending process:', error);
     });
@@ -167,6 +176,7 @@ export class DebitNoteService {
         notaDebito.sri_estado = 'ERROR_FIRMA';
         notaDebito.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await notaDebito.save();
+        recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
         return;
       }
 
@@ -192,6 +202,7 @@ export class DebitNoteService {
           notaDebito.sri_mensajes = respuestaSRI.mensajes;
         }
         await notaDebito.save();
+        recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -207,12 +218,14 @@ export class DebitNoteService {
         notaDebito.sri_estado = 'ERROR_FIRMA';
         notaDebito.sri_mensajes = { error: error.message };
         await notaDebito.save();
+        recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       notaDebito.sri_estado = 'ERROR_PROCESO';
       notaDebito.sri_mensajes = { error: error.message };
       await notaDebito.save();
+      recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
     }
   }
 
@@ -271,6 +284,7 @@ export class DebitNoteService {
       }
 
       await notaDebito.save();
+      recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

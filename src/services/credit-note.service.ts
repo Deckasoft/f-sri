@@ -9,6 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import CreditNote from '../models/CreditNote';
 import CreditNoteDetail from '../models/CreditNoteDetail';
 import CreditNotePDF from '../models/CreditNotePDF';
@@ -156,6 +157,14 @@ export class CreditNoteService {
 
     await notaCredito.save();
 
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '04',
+      documentId: String(notaCredito._id),
+      claveAcceso: notaCredito.clave_acceso,
+      sriEstado: 'PENDIENTE',
+    });
+
     this.procesarEnvioSRI(notaCredito, empresa, cliente, productos, datos).catch((error) => {
       console.error('Error in asynchronous SRI sending process:', error);
     });
@@ -219,6 +228,7 @@ export class CreditNoteService {
         notaCredito.sri_estado = 'ERROR_FIRMA';
         notaCredito.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await notaCredito.save();
+        recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
         return;
       }
 
@@ -244,6 +254,7 @@ export class CreditNoteService {
           notaCredito.sri_mensajes = respuestaSRI.mensajes;
         }
         await notaCredito.save();
+        recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -259,12 +270,14 @@ export class CreditNoteService {
         notaCredito.sri_estado = 'ERROR_FIRMA';
         notaCredito.sri_mensajes = { error: error.message };
         await notaCredito.save();
+        recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       notaCredito.sri_estado = 'ERROR_PROCESO';
       notaCredito.sri_mensajes = { error: error.message };
       await notaCredito.save();
+      recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
     }
   }
 
@@ -323,6 +336,7 @@ export class CreditNoteService {
       }
 
       await notaCredito.save();
+      recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);
