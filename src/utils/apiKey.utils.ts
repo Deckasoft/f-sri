@@ -1,4 +1,4 @@
-import crypto from 'crypto';
+import { generateRandomToken, sha256Hex } from './token.utils';
 
 export const API_KEY_PREFIX = 'sk_live_';
 const PREFIX_DISPLAY_LENGTH = 12;
@@ -17,7 +17,7 @@ export interface GeneratedApiKey {
  * stored hash and to look up an incoming request's key by equality, so no
  * per-request bcrypt cost is paid on the hot invoicing path.
  */
-export const hashApiKey = (token: string): string => crypto.createHash('sha256').update(token).digest('hex');
+export const hashApiKey = (token: string): string => sha256Hex(token);
 
 /**
  * Generates a new API key: `sk_live_` followed by 32 random bytes,
@@ -25,7 +25,7 @@ export const hashApiKey = (token: string): string => crypto.createHash('sha256')
  * to the caller once), its display prefix, and its stored hash.
  */
 export const generateApiKey = (): GeneratedApiKey => {
-  const token = `${API_KEY_PREFIX}${crypto.randomBytes(32).toString('base64url')}`;
+  const token = generateRandomToken(API_KEY_PREFIX);
   return {
     token,
     prefix: token.slice(0, PREFIX_DISPLAY_LENGTH),
