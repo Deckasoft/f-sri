@@ -2,7 +2,7 @@ import path from 'path';
 import express from 'express';
 import helmet from 'helmet';
 import { loadEnv } from './config/env.config';
-import { generalLimiter } from './config/rateLimit.config';
+import { tenantLimiter } from './config/rateLimit.config';
 import adminAuthRoutes from './routes/admin/auth';
 import adminRoutes from './routes/admin';
 import onboardingRoutes from './routes/onboarding';
@@ -42,10 +42,16 @@ export const createApp = (options: CreateAppOptions = {}) => {
   loadEnv();
 
   const app = express();
+  // Mirrors index.ts: trust the immediate reverse-proxy hop so req.ip
+  // reflects the real caller (see the comment in index.ts for why `1`, not
+  // `true`).
+  app.set('trust proxy', 1);
   // Mirrors index.ts's helmet config (CSP off — see index.ts for why).
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(express.json());
-  app.use('/api/v1', generalLimiter, apiKeyAuth);
+  // Mirrors index.ts: auth first, then the per-tenant limiter (see index.ts
+  // for why the order matters).
+  app.use('/api/v1', apiKeyAuth, tenantLimiter);
   app.use('/api/v1/identification-type', identificationTypeRoutes);
   app.use('/api/v1/issuing-company', issuingCompanyRoutes);
   app.use('/api/v1/client', clientRoutes);

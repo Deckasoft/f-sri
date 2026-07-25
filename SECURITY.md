@@ -111,10 +111,27 @@ administrador.
   deshabilitado deliberadamente porque `/docs` sirve Swagger UI desde un CDN
   externo — ver el comentario en `src/index.ts`).
 - **Rate limiting** (`express-rate-limit`, `src/config/rateLimit.config.ts`):
-  - `generalLimiter` en todo `/api/v1/*`: 300 peticiones / 15 min.
-  - `authLimiter`, más estricto, en las superficies públicas o
-    auth-adyacentes: `POST /admin/api/auth/login` y `/onboarding/api/*`: 10
+  - `tenantLimiter` en todo `/api/v1/*`: 1000 peticiones / 15 min **por
+    tenant** (clave = `req.auth.companyId`, resuelto por `apiKeyAuth`, que
+    corre antes que el limiter — ver `src/index.ts`). Deliberadamente no se
+    acota por IP: detrás del reverse proxy Caddy (`Caddyfile`,
+    `compose.prod.yml`) todo el tráfico llega desde la misma dirección
+    interna, así que una clave por IP metería a todos los tenants de la
+    plataforma en el mismo balde.
+  - `adminLoginLimiter`, por IP, solo en `POST /admin/api/auth/login`: 10
     peticiones / 15 min.
+  - `onboardingLimiter`, por IP, solo en `/onboarding/api/*`: 20 peticiones /
+    15 min. Es un balde separado de `adminLoginLimiter` a propósito: una
+    ráfaga de tráfico de onboarding de tenants no debe poder bloquear el
+    login de los operadores, ni viceversa.
+  - `app.set('trust proxy', 1)` (`src/index.ts`/`src/testApp.ts`) le dice a
+    Express que confíe en el primer salto (Caddy) para resolver `req.ip` a
+    partir de `X-Forwarded-For` — necesario para que `adminLoginLimiter` y
+    `onboardingLimiter` (ambos por IP) vean la IP real del cliente y no la
+    del proxy. Se usa `1`, no `true`: `true` habilitaría confiar en toda la
+    cadena de `X-Forwarded-For` (spoofeable por el propio cliente) y
+    `express-rate-limit` rechaza arrancar con esa configuración
+    (`ERR_ERL_PERMISSIVE_TRUST_PROXY`).
 - **CORS**: configurable vía `ALLOWED_ORIGINS` (lista separada por comas) y
   `CORS_DISABLED` (ver `src/config/cors.config.ts`); nunca deshabilitar CORS
   en producción.

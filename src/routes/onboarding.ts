@@ -11,18 +11,19 @@ import { encrypt } from '../utils/encryption.utils';
 import { verifyP12Password } from '../utils/certificate.utils';
 import { generateApiKey } from '../utils/apiKey.utils';
 import { hashInviteToken } from '../utils/invite.utils';
-import { authLimiter } from '../config/rateLimit.config';
+import { onboardingLimiter } from '../config/rateLimit.config';
 
 /**
  * Public, unauthenticated onboarding flow: a client redeeming an invite has
  * no credentials yet — that's the point of this flow — so nothing here can
  * be mounted behind apiKeyAuth or adminAuth (see src/index.ts / src/testApp.ts,
  * which mount this router outside both guards, alongside the public admin
- * login route). Rate-limited with the same strict limiter as admin login,
- * since this is another public, auth-adjacent surface.
+ * login route). Rate-limited with its own IP-keyed limiter, deliberately
+ * separate from the admin login limiter, so a burst of onboarding traffic
+ * can never lock out operator login (see H-1 in the whole-branch review).
  */
 const router = Router();
-router.use(authLimiter);
+router.use(onboardingLimiter);
 
 const VISIBLE_RUC_DIGITS = 4;
 

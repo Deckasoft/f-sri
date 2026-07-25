@@ -3,7 +3,7 @@ import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { z } from 'zod';
 import User from '../../models/User';
-import { authLimiter } from '../../config/rateLimit.config';
+import { adminLoginLimiter } from '../../config/rateLimit.config';
 
 const router = Router();
 
@@ -12,7 +12,7 @@ const loginSchema = z.object({
   password: z.string().min(1),
 });
 
-router.post('/login', authLimiter, async (req, res) => {
+router.post('/login', adminLoginLimiter, async (req, res) => {
   const parsed = loginSchema.safeParse(req.body);
   if (!parsed.success) {
     return res.status(400).json({ message: 'Email y contraseña requeridos' });

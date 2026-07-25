@@ -15,7 +15,7 @@ import mongoose from 'mongoose';
 import cors from 'cors';
 import helmet from 'helmet';
 import { getCorsConfig } from './config/cors.config';
-import { generalLimiter } from './config/rateLimit.config';
+import { tenantLimiter } from './config/rateLimit.config';
 import swaggerSpec from './swagger';
 import corsTestRoutes from './routes/cors-test';
 import adminAuthRoutes from './routes/admin/auth';
@@ -38,6 +38,17 @@ import corsErrorHandler from './middleware/corsErrorHandler';
 import { mountSpaFallback } from './staticSpa';
 
 const app = express();
+
+// This API is only ever reached through the Caddy reverse proxy defined in
+// Caddyfile (compose.prod.yml — `caddy` -> `api:3000` on an internal Docker
+// network), so req.ip/req.ips must be resolved from the X-Forwarded-For
+// header Caddy sets, not from the proxy's own connection address. Without
+// this, every request from every tenant appears to originate from the same
+// container IP. `1` (not `true`) trusts exactly the immediate hop (Caddy) —
+// `true` trusts the entire X-Forwarded-For chain, which express-rate-limit
+// refuses to start under (ERR_ERL_PERMISSIVE_TRUST_PROXY) because it would
+// let a caller spoof its own rate-limit key via the header.
+app.set('trust proxy', 1);
 
 // Cabeceras de seguridad HTTP (helmet). CSP se desactiva porque /docs sirve
 // Swagger UI desde un CDN externo (unpkg.com); el CSP por defecto de helmet
@@ -103,8 +114,13 @@ app.get('/health', (_req, res) => {
   });
 });
 
-// General rate limiter + per-tenant API key auth for the invoicing API
-app.use('/api/v1', generalLimiter, apiKeyAuth);
+// Per-tenant API key auth, THEN the per-tenant rate limiter for the
+// invoicing API. Order matters: tenantLimiter keys its bucket off
+// req.auth.companyId (see src/config/rateLimit.config.ts), which apiKeyAuth
+// populates — running the limiter first would mean either keying on IP
+// (wrong behind the Caddy reverse proxy, see H-1 in the whole-branch review)
+// or having no tenant to key on yet.
+app.use('/api/v1', apiKeyAuth, tenantLimiter);
 app.use('/api/v1/identification-type', identificationTypeRoutes);
 app.use('/api/v1/issuing-company', issuingCompanyRoutes);
 app.use('/api/v1/client', clientRoutes);
@@ -118,8 +134,10 @@ app.use('/api/v1/invoice-detail', invoiceDetailRoutes);
 app.use('/api/v1/invoice-pdf', invoicePDFRoutes);
 
 // Public, unauthenticated onboarding flow (invite redemption). Rate-limited
-// internally (authLimiter) since it's another public, auth-adjacent surface,
-// same category as the admin login route below.
+// internally (onboardingLimiter, IP-keyed) since it's another public,
+// auth-adjacent surface — deliberately its own bucket, separate from the
+// admin login limiter below, so a burst of onboarding traffic can't lock out
+// operator login (see H-1 in the whole-branch review).
 app.use('/onboarding/api', onboardingRoutes);
 
 // Admin backoffice API (Phase 4 builds on this). Login is public; the
