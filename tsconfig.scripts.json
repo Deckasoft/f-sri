@@ -1,5 +1,5 @@
 {
-  // Compiles the operational scripts (currently just create-admin.ts) to
+  // Compiles the operational scripts (create-admin.ts, seed-identification-types.ts) to
   // plain JS in dist-scripts/, so the production Docker image can run them
   // with a plain `node` invocation instead of needing ts-node + typescript +
   // the full src/ TypeScript source tree in the runtime stage (see
@@ -22,6 +22,6 @@
     "outDir": "dist-scripts",
     "types": ["node"]
   },
-  "include": ["scripts/create-admin.ts"],
+  "include": ["scripts/create-admin.ts", "scripts/seed-identification-types.ts"],
   "exclude": ["node_modules", "dist", "dist-scripts", "admin", "__tests__"]
 }

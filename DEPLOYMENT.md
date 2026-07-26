@@ -268,6 +268,10 @@ curl -I https://tudominio.com/health
 
 ## 5. Crear el primer usuario admin
 
+> ⚠️ **Antes de esto (o justo después), sembrar el catálogo de tipos de
+> identificación — es OBLIGATORIO, ver sección 5.1.** Sin ese paso no se
+> puede crear ningún cliente ni emitir ningún comprobante.
+
 `scripts/create-admin.ts` se precompila a `dist-scripts/scripts/create-admin.js`
 durante el build de la imagen (ver `tsconfig.scripts.json`) — el contenedor
 en producción no tiene `ts-node`/`typescript` ni el código fuente en `src/`
@@ -285,6 +289,39 @@ p. ej. `docker compose -f compose.prod.yml exec -e ADMIN_EMAIL=... -e
 ADMIN_PASSWORD=... api node dist-scripts/scripts/create-admin.js` — ver
 `scripts/create-admin.ts` para la lógica). Con eso puedes hacer login en
 `POST /admin/api/auth/login` y acceder al backoffice en `/admin`.
+
+### 5.1 Sembrar el catálogo de tipos de identificación (OBLIGATORIO)
+
+`identification-type` es un catálogo **global y de solo lectura**: sus rutas
+de mutación se eliminaron a propósito, porque cualquier tenant autenticado
+podía modificar entradas de las que dependen todos los demás para emitir. La
+consecuencia es que **nada lo puebla solo**: en una base de datos nueva la
+colección arranca vacía, y
+
+- `Client.tipo_identificacion_id` es requerido y referencia este catálogo, y
+- la emisión resuelve el tipo por código y falla con
+  `Identification type not found` si no lo encuentra.
+
+Es decir: sin este paso **no se puede crear ningún cliente ni emitir ningún
+comprobante**. Correr una vez por despliegue nuevo (es idempotente, se puede
+repetir sin duplicar):
+
+```bash
+docker compose -f compose.prod.yml exec api \
+  node dist-scripts/scripts/seed-identification-types.js
+```
+
+En local, con `compose.local.yml`, es el mismo comando cambiando el archivo
+de compose; y fuera de Docker, `npm run seed:identification-types`.
+
+Siembra los cinco códigos que define el SRI en su ficha técnica —`04` RUC,
+`05` CÉDULA, `06` PASAPORTE, `07` VENTA A CONSUMIDOR FINAL, `08`
+IDENTIFICACIÓN DEL EXTERIOR—. No son configurables: el XML emitido debe usar
+exactamente esos valores. Verificar con:
+
+```bash
+curl -H "X-API-Key: <una-api-key>" http://localhost:3000/api/v1/identification-type
+```
 
 ## 6. Actualizar a una nueva versión
 
