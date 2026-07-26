@@ -16,9 +16,12 @@
 # ports 80/443. Locally it would only add breakage, so the api port is
 # published directly instead.
 #
-# Deliberately NO published mongo port: the api reaches mongo over the compose
-# network as `mongo:27017`, so this stack cannot collide with a MongoDB you
-# already have bound to 27017 on the host (e.g. the one compose.yml starts).
+# El mongo se publica en el host en el puerto 27018 (no 27017), para poder
+# conectarse con Compass/mongosh sin chocar con el mongo que ya publica
+# compose.yml en 27017. Se puede cambiar con MONGO_HOST_PORT. La api NO usa
+# ese puerto: la alcanza por la red de compose como `mongo:27017`.
+#
+#   mongodb://root:example@localhost:27018/f-sri-local?authSource=admin
 #
 #   ⚠️ APPLE SILICON / ARM HOSTS: the `platform: linux/amd64` key on the api
 #      service below is load-bearing — do NOT remove it. A native arm64 build
@@ -82,8 +85,20 @@ services:
     environment:
       MONGO_INITDB_ROOT_USERNAME: root
       MONGO_INITDB_ROOT_PASSWORD: example
-    # No `ports:` — reachable only from the compose network, so this never
-    # fights whatever is already on the host's 27017.
+    # Publicado en el host para poder inspeccionar la base con Compass,
+    # mongosh o cualquier cliente GUI durante el desarrollo.
+    #
+    # Por defecto 27018 y NO 27017 a propósito: compose.yml (el de desarrollo,
+    # que se usa junto a `npm run dev`) ya publica un mongo en 27017, así que
+    # levantar ambos con el puerto por defecto falla con "port is already
+    # allocated". Con 27018 los dos stacks conviven. Se puede forzar otro
+    # puerto con MONGO_HOST_PORT si hiciera falta.
+    #
+    # Solo aplica a este archivo local: compose.prod.yml no tiene servicio
+    # mongo (producción usa Atlas), así que esto nunca expone una base de
+    # producción.
+    ports:
+      - '${MONGO_HOST_PORT:-27018}:27017'
     healthcheck:
       test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping')"]
       interval: 10s
