@@ -127,11 +127,20 @@ localhost: `mongodb://root:example@mongo:27017/f-sri-local?authSource=admin`.
 deja `RESEND_API_KEY` sin definir el envío de emails se degrada
 silenciosamente en vez de fallar. `.env.local` está en `.gitignore`.
 
-Este stack **no publica el puerto de mongo**, así que convive sin conflicto
-con cualquier MongoDB que ya tengas escuchando en el 27017 del host (por
-ejemplo el de `compose.yml`) — no hace falta pararlo. Tampoco incluye Caddy:
-su HTTPS automático necesita un dominio público real, así que en local se
-publica el puerto de la API directamente.
+El mongo de este stack se publica en el host en el **27018** (no en el 27017),
+para poder inspeccionarlo con Compass/mongosh sin chocar con el mongo que ya
+publica `compose.yml` en 27017 — los dos stacks conviven, no hace falta parar
+ninguno. Cadena de conexión:
+
+```
+mongodb://root:example@localhost:27018/f-sri-local?authSource=admin
+```
+
+Se puede cambiar el puerto del host con `MONGO_HOST_PORT`. La API no usa ese
+puerto: alcanza a mongo por la red de compose como `mongo:27017`.
+
+Tampoco incluye Caddy: su HTTPS automático necesita un dominio público real,
+así que en local se publica el puerto de la API directamente.
 
 > ⚠️ **Apple Silicon / ARM**: el servicio `api` fija `platform: linux/amd64`
 > a propósito. No quitarlo: una build nativa arm64 produce una imagen cuyo

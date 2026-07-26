@@ -141,9 +141,16 @@ export type InvitePreview = z.infer<typeof invitePreviewSchema>;
 
 // Mirrors src/routes/onboarding.ts's POST /complete response — the ONLY
 // place the tenant's first API key raw token is ever returned.
+//
+// El mismo endpoint atiende el alta inicial y la renovación del certificado.
+// Solo emite API key si el tenant no tiene ninguna activa, así que `api_key`
+// es opcional y hay que mirar `api_key_issued` para saber en cuál de los dos
+// casos estamos: en una renovación no se emite ninguna y la key que ya tiene
+// el tenant sigue siendo válida.
 export const onboardingCompleteResponseSchema = z.object({
   message: z.string(),
-  api_key: z.string(),
+  api_key_issued: z.boolean(),
+  api_key: z.string().optional(),
   company: z.object({
     id: z.string(),
     razon_social: z.string(),

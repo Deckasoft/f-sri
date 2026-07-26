@@ -37,6 +37,10 @@ class MockApiKey {
     savedApiKeys.push(this);
   }
   save = jest.fn().mockResolvedValue(this);
+  // El handler cuenta las keys ACTIVAS del tenant para decidir si emite una
+  // nueva: alta inicial (0 activas -> emite) vs renovación de certificado
+  // (ya tiene -> no emite). Por defecto 0, y cada test lo ajusta.
+  static countDocuments = jest.fn().mockResolvedValue(0);
 }
 jest.mock('../src/models/ApiKey', () => ({ __esModule: true, default: MockApiKey }));
 
@@ -65,6 +69,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     savedApiKeys.length = 0;
+    MockApiKey.countDocuments.mockResolvedValue(0);
     inviteStaticMocks.findOne.mockResolvedValue(null);
     inviteStaticMocks.findOneAndUpdate.mockResolvedValue(null);
     issuingCompanyStaticMocks.findById.mockResolvedValue(null);
@@ -189,6 +194,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
       const res = await request(app).post('/onboarding/api/complete').send(validBody());
 
       expect(res.status).toBe(201);
+      expect(res.body.api_key_issued).toBe(true);
       expect(res.body.api_key).toMatch(/^sk_live_/);
       expect(res.body.company).toEqual({
         id: company._id,
@@ -203,14 +209,62 @@ describe('Public onboarding routes (/onboarding/api)', () => {
       // tenant must not be able to overwrite its certificate via a
       // still-live invite.
       expect(filterArg).toEqual({ _id: 'company-1', active: true });
-      expect(updatePayload.certificate).not.toBe(validBody().certificate);
-      expect(updatePayload.certificate_password).not.toBe('super-secret');
-      expect(updatePayload.onboarded_at).toBeInstanceOf(Date);
+      // Es un update por PIPELINE de agregación, no por documento: hace falta
+      // para escribir onboarded_at una sola vez ($ifNull) sin perder
+      // atomicidad, ya que este mismo endpoint atiende también renovaciones.
+      const [{ $set: setStage }] = updatePayload;
+      expect(setStage.certificate).not.toBe(validBody().certificate);
+      expect(setStage.certificate_password).not.toBe('super-secret');
+      expect(setStage.onboarded_at).toEqual({ $ifNull: ['$onboarded_at', expect.any(Date)] });
+      expect(setStage.certificate_updated_at).toBeInstanceOf(Date);
       expect(options).toEqual({ new: true });
 
       expect(savedApiKeys).toHaveLength(1);
       expect(savedApiKeys[0].empresa_emisora_id).toBe(company._id);
       expect(savedApiKeys[0].key_hash).not.toBe(res.body.api_key);
+    });
+
+    it('RENOVACIÓN: no emite API key nueva si el tenant ya tiene una activa', async () => {
+      // El mismo flujo de invitación se reutiliza para renovar el certificado
+      // (los del SRI caducan). Si emitiera una key en cada renovación, el
+      // tenant acumularía credenciales vivas sin que nadie las revoque.
+      MockApiKey.countDocuments.mockResolvedValue(1);
+      inviteStaticMocks.findOneAndUpdate.mockResolvedValueOnce({
+        _id: 'invite-2',
+        empresa_emisora_id: 'company-1',
+      });
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(company);
+
+      const res = await request(app).post('/onboarding/api/complete').send(validBody());
+
+      expect(res.status).toBe(201);
+      expect(res.body.api_key_issued).toBe(false);
+      expect(res.body.api_key).toBeUndefined();
+      // Lo importante: el certificado SÍ se actualizó, pero no se acuñó
+      // ninguna credencial nueva.
+      expect(savedApiKeys).toHaveLength(0);
+      const [, updatePayload] = issuingCompanyStaticMocks.findOneAndUpdate.mock.calls[0];
+      expect(updatePayload[0].$set.certificate_updated_at).toBeInstanceOf(Date);
+    });
+
+    it('RENOVACIÓN: solo cuenta las keys NO revocadas', async () => {
+      MockApiKey.countDocuments.mockResolvedValue(0);
+      inviteStaticMocks.findOneAndUpdate.mockResolvedValueOnce({
+        _id: 'invite-3',
+        empresa_emisora_id: 'company-1',
+      });
+      issuingCompanyStaticMocks.findOneAndUpdate.mockResolvedValueOnce(company);
+
+      await request(app).post('/onboarding/api/complete').send(validBody());
+
+      // Si un admin revocó TODAS las keys (p. ej. sospecha de filtración), la
+      // siguiente invitación funciona como vía de recuperación: vuelve a
+      // emitir. De ahí que el filtro sea revoked_at: null y no el total.
+      expect(MockApiKey.countDocuments).toHaveBeenCalledWith({
+        empresa_emisora_id: company._id,
+        revoked_at: null,
+      });
+      expect(savedApiKeys).toHaveLength(1);
     });
 
     it('maps an optional contact_email onto email_notificacion', async () => {
@@ -225,7 +279,7 @@ describe('Public onboarding routes (/onboarding/api)', () => {
         .send({ ...validBody(), contact_email: 'ops@empresademo.com' });
 
       const [, updatePayload] = issuingCompanyStaticMocks.findOneAndUpdate.mock.calls[0];
-      expect(updatePayload.email_notificacion).toBe('ops@empresademo.com');
+      expect(updatePayload[0].$set.email_notificacion).toBe('ops@empresademo.com');
     });
 
     it('returns 404 when the invite points at a tenant that no longer exists', async () => {

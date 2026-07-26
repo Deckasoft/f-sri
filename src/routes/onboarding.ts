@@ -141,14 +141,25 @@ router.post('/complete', async (req, res) => {
     // it from *writing* here. This does the existence + active check and the
     // update as a single atomic operation, so there's no separate
     // read-then-write race window.
+    // Update por pipeline de agregación (no por documento) para poder
+    // escribir `onboarded_at` UNA sola vez sin dejar de ser atómico: con
+    // $ifNull conserva el valor existente si ya lo hay, así que una
+    // renovación no borra la fecha del alta original. `certificate_updated_at`
+    // sí se pisa en cada subida — es justamente el dato que interesa para
+    // saber cuándo caduca el certificado.
     const company = await IssuingCompany.findOneAndUpdate(
       { _id: invite.empresa_emisora_id, active: true },
-      {
-        certificate: encrypt(certificate),
-        certificate_password: encrypt(certificatePassword),
-        onboarded_at: now,
-        ...(contactEmail ? { email_notificacion: contactEmail } : {}),
-      },
+      [
+        {
+          $set: {
+            certificate: encrypt(certificate),
+            certificate_password: encrypt(certificatePassword),
+            onboarded_at: { $ifNull: ['$onboarded_at', now] },
+            certificate_updated_at: now,
+            ...(contactEmail ? { email_notificacion: contactEmail } : {}),
+          },
+        },
+      ],
       { new: true },
     );
     if (!company) {
@@ -162,20 +173,50 @@ router.post('/complete', async (req, res) => {
       return res.status(404).json({ message: 'Tenant not found' });
     }
 
-    const { token: apiKeyToken, prefix, hash } = generateApiKey();
-    const apiKey = new ApiKey({
+    // Este mismo flujo sirve para dos casos: el alta inicial de un tenant y
+    // la RENOVACIÓN de su certificado (los del SRI caducan, típicamente cada
+    // 1-2 años; el admin genera otra invitación y el tenant vuelve a subir su
+    // .p12 por la misma página). Se distinguen por datos, no por endpoint:
+    // solo se emite una API key si el tenant no tiene ninguna activa.
+    //
+    // Sin esta condición, cada renovación acuñaría otra key permanente sin
+    // revocar la anterior — tras tres renovaciones el tenant tendría cuatro
+    // credenciales vivas. Y revocarlas todas tampoco es opción: rompería su
+    // integración en producción justo cuando renueva el certificado.
+    //
+    // Se cuentan solo las NO revocadas a propósito: si un admin las revocó
+    // todas (p. ej. sospecha de filtración), la siguiente invitación funciona
+    // como vía de recuperación y entrega una key nueva.
+    const activeKeys = await ApiKey.countDocuments({
       empresa_emisora_id: company._id,
-      name: 'Onboarding',
-      prefix,
-      key_hash: hash,
+      revoked_at: null,
     });
-    await apiKey.save();
 
-    // The API key's raw token is returned exactly once, here — this is the
-    // credential the client walks away with; it is never displayed again.
+    const issueApiKey = async (): Promise<string | undefined> => {
+      if (activeKeys > 0) {
+        return undefined;
+      }
+      const { token: generatedToken, prefix, hash } = generateApiKey();
+      await new ApiKey({
+        empresa_emisora_id: company._id,
+        name: 'Onboarding',
+        prefix,
+        key_hash: hash,
+      }).save();
+      return generatedToken;
+    };
+    const apiKeyToken = await issueApiKey();
+
+    // Cuando se emite, el token en claro se devuelve exactamente aquí y nunca
+    // se vuelve a mostrar: es la credencial con la que se queda el cliente.
+    // En una renovación no se emite ninguna, y `api_key_issued: false` le
+    // dice a la SPA que muestre "certificado actualizado, tu API key sigue
+    // funcionando" en vez del recuadro de secreto de un solo uso — si no, el
+    // tenant creería que tiene que redesplegar su integración.
     return res.status(201).json({
-      message: 'Onboarding complete',
-      api_key: apiKeyToken,
+      message: apiKeyToken ? 'Onboarding complete' : 'Certificate updated',
+      api_key_issued: apiKeyToken !== undefined,
+      ...(apiKeyToken ? { api_key: apiKeyToken } : {}),
       company: {
         id: company._id,
         razon_social: company.razon_social,
