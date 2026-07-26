@@ -18,7 +18,7 @@
     "lint": "prettier --check \"src/**/*.ts\"",
     "lint:fix": "prettier --write \"src/**/*.ts\"",
     "typecheck": "tsc --noEmit",
-    "validate": "npm run typecheck && npm run lint && npm run test:ci",
+    "validate": "npm run typecheck && npm run lint && npm run build && npm run test:ci",
     "format": "prettier --write \"src/**/*.ts\" \"__tests__/**/*.ts\"",
     "create-admin": "ts-node scripts/create-admin.ts",
     "seed:identification-types": "ts-node scripts/seed-identification-types.ts"

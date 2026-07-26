@@ -4,5 +4,16 @@
     "rootDir": "src",
     "types": ["node"]
   },
-  "exclude": ["__tests__", "scripts", "node_modules", "dist"]
+  // OJO: `extends` NO fusiona arrays — este `exclude` REEMPLAZA por completo
+  // el de tsconfig.json. Así que aunque el padre ya excluye "admin", hay que
+  // repetirlo aquí, o `tsc -p tsconfig.build.json` intenta compilar la SPA
+  // (admin/**/*.tsx) y falla con TS6059 "is not under rootDir 'src'".
+  //
+  // Pasó desapercibido porque nada en local ejercitaba este config:
+  // `npm run validate` corría typecheck (tsconfig.json, que sí excluye admin),
+  // lint y tests, pero no `npm run build`; y el build de Docker sí lo corre,
+  // pero en una etapa que solo copia src/, así que admin/ no está ahí. Solo lo
+  // destapó el job "Build Application" de CI. Por eso `validate` ahora también
+  // corre `npm run build`.
+  "exclude": ["__tests__", "scripts", "node_modules", "dist", "dist-scripts", "admin"]
 }
