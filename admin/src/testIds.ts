@@ -33,3 +33,6 @@ export const TESTID_ONBOARDING_FILE_INPUT = 'onboarding-file-input';
 export const TESTID_ONBOARDING_PASSWORD_INPUT = 'onboarding-password-input';
 export const TESTID_ONBOARDING_EMAIL_INPUT = 'onboarding-email-input';
 export const TESTID_ONBOARDING_SUBMIT = 'onboarding-submit';
+// Mostrado tras una RENOVACIÓN de certificado, en lugar del recuadro de
+// secreto de un solo uso: en ese caso no se emite API key nueva.
+export const TESTID_ONBOARDING_KEY_UNCHANGED = 'onboarding-key-unchanged';

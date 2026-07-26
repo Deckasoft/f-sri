@@ -7,6 +7,7 @@ import { ShowOnceSecret } from '../components/ShowOnceSecret';
 import {
   TESTID_ONBOARDING_EMAIL_INPUT,
   TESTID_ONBOARDING_FILE_INPUT,
+  TESTID_ONBOARDING_KEY_UNCHANGED,
   TESTID_ONBOARDING_PASSWORD_INPUT,
   TESTID_ONBOARDING_SUBMIT,
 } from '../testIds';
@@ -94,15 +95,27 @@ export const OnboardingPage = () => {
     return (
       <main className="centered-page">
         <div className="card">
-          <h1>Registro completado</h1>
+          {/* Dos casos por el mismo flujo: alta inicial (se emite una API key,
+              que sólo se muestra aquí y nunca más) y renovación de certificado
+              (no se emite ninguna, porque el tenant ya tiene una activa). Sin
+              distinguirlos, quien renueva vería un recuadro de "tu clave de
+              API" vacío y creería que debe redesplegar su integración. */}
+          <h1>{result.api_key_issued ? 'Registro completado' : 'Certificado actualizado'}</h1>
           <p>
             {result.company.razon_social} ({result.company.ruc}) ya puede emitir comprobantes.
           </p>
-          <ShowOnceSecret
-            title="Tu clave de API"
-            description="Úsala como Bearer token contra /api/v1."
-            value={result.api_key}
-          />
+          {result.api_key_issued && result.api_key ? (
+            <ShowOnceSecret
+              title="Tu clave de API"
+              description="Úsala como Bearer token contra /api/v1."
+              value={result.api_key}
+            />
+          ) : (
+            <p data-testid={TESTID_ONBOARDING_KEY_UNCHANGED}>
+              Tu clave de API existente sigue funcionando: no hace falta cambiar nada en tu
+              integración.
+            </p>
+          )}
         </div>
       </main>
     );

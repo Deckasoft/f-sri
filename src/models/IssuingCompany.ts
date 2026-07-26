@@ -25,6 +25,7 @@ export interface IIssuingCompany extends Document {
   user_id?: Types.ObjectId;
   active: boolean;
   onboarded_at?: Date;
+  certificate_updated_at?: Date;
   created_by?: Types.ObjectId; // Reference to the admin User who provisioned this tenant
 }
 
@@ -52,7 +53,15 @@ const schema = new Schema<IIssuingCompany>(
     certificate_password: { type: String, select: false },
     user_id: { type: Schema.Types.ObjectId, ref: 'User' },
     active: { type: Boolean, required: true, default: true },
+    // Fecha del alta inicial: se escribe UNA sola vez. El mismo flujo de
+    // invitación se reutiliza para renovar el certificado, así que sin esa
+    // condición la primera renovación borraría para siempre cuándo entró el
+    // cliente.
     onboarded_at: { type: Date },
+    // Se actualiza en CADA subida de certificado (alta y renovaciones). Es la
+    // señal que necesita el backoffice antes de que caduque un certificado del
+    // SRI: "último cambio hace 14 meses".
+    certificate_updated_at: { type: Date },
     created_by: { type: Schema.Types.ObjectId, ref: 'User' },
   },
   {
