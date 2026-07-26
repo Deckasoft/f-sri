@@ -156,6 +156,66 @@ administrador.
   autenticada, nunca por un identificador que llegue en el cuerpo o la URL de
   la petición.
 
+## 📋 Estado del `npm audit` y por qué el job de CI aparece en verde
+
+> **Deuda conocida, aún sin resolver.** Documentado aquí para que sea visible
+> en vez de quedar silenciosamente en verde. Última revisión: 2026-07-26.
+
+El job **Security Scan** de `.github/workflows/ci.yml` sale en ✓ aunque sus
+pasos fallen: los dos llevan `continue-on-error: true`.
+
+```yaml
+- name: Run security audit
+  run: npm audit --audit-level=moderate
+  continue-on-error: true      # <- se traga el fallo
+```
+
+`npm audit` devuelve un código distinto de cero cuando encuentra algo a partir
+del umbral indicado, así que **hoy ninguna vulnerabilidad de dependencias puede
+tumbar el pipeline**, en un servicio que custodia los certificados de firma
+(.p12) de los clientes. El job "termina bien", pero sus pasos han dado error.
+
+### Lo que reporta ahora mismo
+
+17 vulnerabilidades en dependencias **de producción** (25 contando las de
+desarrollo): 1 crítica y 10 altas.
+
+| Paquete | Severidad | Procedencia |
+| --- | --- | --- |
+| `basic-ftp` | crítica | `puppeteer → @puppeteer/browsers → proxy-agent → … → get-uri` |
+| `@xmldom/xmldom` | alta | dependencia directa, y también vía `ec-sri-invoice-signer` y `xml-crypto` |
+| `express` | alta | vía `body-parser` y `path-to-regexp` |
+| `mongoose`, `axios`, `jws`, `ws`, `lodash`, `js-yaml`, `form-data` | alta | mayormente directas |
+
+Dos merecen tratamiento distinto:
+
+- **La crítica engaña.** `basic-ftp` cuelga del soporte de proxy del
+  *descargador de navegador* de Puppeteer: se alcanza al bajar Chromium, no al
+  renderizar un PDF. En la imagen de Docker, Chromium se instala en build time,
+  así que no está en la ruta de ejecución. Es real, pero no la emergencia que
+  sugiere la palabra "crítica".
+- **`@xmldom/xmldom` es la que importa.** Está en la ruta de firma XAdES. Las
+  vulnerabilidades de parsers XML en una ruta de firma digital son justamente
+  la clase que habilita ataques de *signature wrapping*, y estos comprobantes
+  tienen validez legal.
+
+### Cómo dejarlo honesto cuando se aborde
+
+Quitar `continue-on-error` y acotar el paso bloqueante a producción, para que
+un CVE que sí se ejecuta rompa CI sin que lo hagan los hallazgos aceptados del
+toolchain de la SPA (dev-only, inalcanzables desde el bundle publicado):
+
+```yaml
+- name: Run security audit (bloqueante, producción)
+  run: npm audit --omit=dev --audit-level=high
+```
+
+Fallará de inmediato — que es justo el objetivo: estaría diciendo la verdad.
+Parte se arregla con `npm audit fix` (sin `--force`); el resto exige
+`--force`, y en la librería de firma eso implica riesgo real de regresión, así
+que hay que probar la emisión XAdES contra el ambiente de pruebas del SRI
+después de tocar `xmldom`/`xml-crypto`.
+
 ## ⚙️ Variables de entorno relevantes para seguridad
 
 Ver `.env.example` para el detalle completo, en español, de cada variable.
