@@ -10,41 +10,80 @@ jobs:
   test:
     name: Run Tests
     runs-on: ubuntu-latest
-    
+
+    # Single-version matrix (20.x only): package.json now declares
+    # engines.node >= 20, the Dockerfile is pinned to node:20-slim, and
+    # Node 18 is EOL — keeping a two-version matrix around would only
+    # verify a runtime we no longer ship or support. See task-7-report.md.
     strategy:
       matrix:
-        node-version: [18.x, 20.x]
-    
+        node-version: [20.x]
+
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
-      
+
     - name: Setup Node.js ${{ matrix.node-version }}
       uses: actions/setup-node@v4
       with:
         node-version: ${{ matrix.node-version }}
         cache: 'npm'
-        
+
     - name: Install dependencies
       run: npm ci
-      
+
     - name: Type checking
       run: npm run typecheck
-      
+
     - name: Run linting
       run: npm run lint
-      
+
     - name: Run tests with coverage
       run: npm run test:ci
       env:
         NODE_ENV: test
-        
+
     - name: Upload coverage to Codecov
       uses: codecov/codecov-action@v3
       if: matrix.node-version == '20.x'
       with:
         fail_ci_if_error: false
-        
+
+  admin:
+    name: Build Admin SPA
+    runs-on: ubuntu-latest
+
+    # Runs on every push/PR (not just main): the Docker image now bundles
+    # admin/dist, so a broken SPA build should fail CI the same way a broken
+    # backend build does, not only get caught the next time someone builds
+    # the image by hand.
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20.x'
+        cache: 'npm'
+        cache-dependency-path: admin/package-lock.json
+
+    - name: Install admin dependencies
+      working-directory: admin
+      run: npm ci
+
+    - name: Lint admin (Prettier + ESLint)
+      working-directory: admin
+      run: npm run lint
+
+    - name: Typecheck admin
+      working-directory: admin
+      run: npx tsc -b
+
+    - name: Build admin
+      working-directory: admin
+      run: npm run build
+
   build:
     name: Build Application
     runs-on: ubuntu-latest
@@ -94,4 +133,64 @@ jobs:
       
     - name: Check for vulnerabilities
       run: npm audit fix --dry-run
-      continue-on-error: true 
+      continue-on-error: true
+
+  docker:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    needs: [build, admin]
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: read
+      packages: write
+
+    # This job builds the image (Dockerfile builds both the API and the
+    # admin/ SPA in their own stages — see the Dockerfile) and pushes it to
+    # GHCR. It does NOT deploy: deployment on the VPS is a manual
+    # `docker compose -f compose.prod.yml pull && up -d` over SSH (see
+    # DEPLOYMENT.md). That was a deliberate choice, not an oversight — see
+    # task-7-report.md for the tradeoff (an automated SSH-deploy step would
+    # need an SSH private key stored as a repo secret; documenting the
+    # one-line command avoids holding that credential in CI).
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to GitHub Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Compute lowercase image name
+      # GHCR/Docker registry paths must be all-lowercase. `github.repository`
+      # preserves the repo's actual case (Deckasoft/f-sri), which would
+      # otherwise get passed straight through as an invalid, uppercase image
+      # reference — computed explicitly here rather than assumed, since
+      # compose.prod.yml's default GHCR_IMAGE must match whatever this job
+      # actually publishes.
+      id: image
+      run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+    - name: Extract image metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ steps.image.outputs.name }}
+        tags: |
+          type=raw,value=latest
+          type=sha,format=long
+
+    - name: Build and push
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max

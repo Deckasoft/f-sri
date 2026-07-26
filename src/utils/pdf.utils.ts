@@ -882,19 +882,3 @@ export async function generateWithholdingPDF(data: WithholdingPDFData): Promise<
     }
   }
 }
-
-/**
- * Saves PDF to file system
- */
-export async function savePDFToFile(pdfBuffer: Buffer, filename: string): Promise<string> {
-  const fs = require('fs');
-  const path = require('path');
-  const os = require('os');
-
-  const tempDir = os.tmpdir();
-  const filePath = path.join(tempDir, `${filename}.pdf`);
-
-  fs.writeFileSync(filePath, pdfBuffer);
-
-  return filePath;
-}

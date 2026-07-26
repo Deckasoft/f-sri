@@ -1,5 +1,7 @@
+import { Resend } from 'resend';
+import Invoice from '../models/Invoice';
 import { IInvoicePDF } from '../models/InvoicePDF';
-import nodemailer from 'nodemailer';
+import { PDFStorageFactory } from '../services/storage';
 
 interface EmailTemplate {
   subject: string;
@@ -7,50 +9,37 @@ interface EmailTemplate {
   text: string;
 }
 
+interface EmailAttachment {
+  filename: string;
+  content: Buffer;
+  contentType: string;
+}
+
 interface EmailConfig {
   to: string;
   subject: string;
   html: string;
   text: string;
-  attachments?: Array<{
-    filename: string;
-    content: Buffer;
-    contentType: string;
-  }>;
-}
-
-/**
- * Creates email transporter based on environment configuration
- */
-function createTransporter() {
-  const emailService = process.env.EMAIL_SERVICE || 'gmail';
-  const emailUser = process.env.EMAIL_USER;
-  const emailPassword = process.env.EMAIL_PASSWORD;
-
-  if (!emailUser || !emailPassword) {
-    throw new Error('Email credentials not configured. Set EMAIL_USER and EMAIL_PASSWORD environment variables.');
-  }
-
-  return nodemailer.createTransport({
-    service: emailService,
-    auth: {
-      user: emailUser,
-      pass: emailPassword,
-    },
-  });
+  attachments?: EmailAttachment[];
 }
 
 /**
  * Generates email template for invoice PDF
+ *
+ * El PDF ya no se referencia mediante un enlace de descarga: se adjunta al
+ * email como archivo real (ver sendInvoiceEmail), porque el enlace basado en
+ * pdf_url dejó de ser un valor confiable para mostrar al destinatario — con
+ * el proveedor S3, pdf_url almacena la clave privada del objeto, no una URL
+ * pública, y una URL presignada expiraría de todos modos.
  */
 export function generateInvoiceEmailTemplate(
   invoicePDF: IInvoicePDF,
   clientName: string,
   companyName: string,
 ): EmailTemplate {
-  // Validate that pdf_url exists before generating email
-  if (!invoicePDF.pdf_url) {
-    throw new Error('PDF URL no disponible. El PDF debe estar almacenado antes de enviar el email.');
+  // Validar que el PDF exista en el almacenamiento antes de generar el email
+  if (!invoicePDF.pdf_public_id) {
+    throw new Error('PDF no disponible. El PDF debe estar almacenado antes de enviar el email.');
   }
 
   const subject = `Factura Electrónica - ${invoicePDF.claveAcceso}`;
@@ -68,12 +57,10 @@ export function generateInvoiceEmailTemplate(
         .content { margin-bottom: 20px; }
         .footer { font-size: 12px; color: #666; border-top: 1px solid #ddd; padding-top: 10px; }
         .invoice-details { background-color: #e9ecef; padding: 15px; border-radius: 5px; margin: 15px 0; }
-        .download-button {
-          display: inline-block;
-          padding: 12px 24px;
-          background-color: #007bff;
-          color: white;
-          text-decoration: none;
+        .attachment-note {
+          background-color: #d4edda;
+          color: #155724;
+          padding: 12px 16px;
           border-radius: 5px;
           margin: 15px 0;
         }
@@ -97,8 +84,8 @@ export function generateInvoiceEmailTemplate(
             <strong>Fecha de Generación PDF:</strong> ${invoicePDF.fecha_generacion.toLocaleDateString('es-EC')}
           </div>
 
-          <p style="text-align: center;">
-            <a href="${invoicePDF.pdf_url}" class="download-button">Descargar Factura PDF</a>
+          <p class="attachment-note">
+            📎 Encontrará la factura en formato PDF adjunta a este correo.
           </p>
 
           <p>Por favor, conserve este documento para sus registros contables.</p>
@@ -128,7 +115,7 @@ export function generateInvoiceEmailTemplate(
     Fecha de Autorización: ${invoicePDF.fecha_autorizacion.toLocaleDateString('es-EC')}
     Fecha de Generación PDF: ${invoicePDF.fecha_generacion.toLocaleDateString('es-EC')}
 
-    Descargar PDF: ${invoicePDF.pdf_url}
+    Encontrará la factura en formato PDF adjunta a este correo.
 
     Por favor, conserve este documento para sus registros contables.
 
@@ -144,17 +131,15 @@ export function generateInvoiceEmailTemplate(
 /**
  * Prepares email configuration for sending
  *
- * NOTA: Ya no adjuntamos el PDF directamente en el email.
- * En su lugar, el email incluye un enlace de descarga a la URL pública del PDF.
- * Esto reduce el tamaño de los emails y mejora la velocidad de envío.
- *
- * Si necesitas adjuntar el PDF directamente, puedes descargarlo desde pdf_url
- * usando axios o fetch y agregarlo como attachment.
+ * El PDF (y, cuando exista, el XML autorizado) se adjuntan como archivos
+ * reales — nunca como un enlace, que podría expirar (S3) o simplemente
+ * dejar de reflejar el documento correcto.
  */
 export function prepareEmailConfig(
   invoicePDF: IInvoicePDF,
   emailTemplate: EmailTemplate,
   recipientEmail: string,
+  attachments: EmailAttachment[] = [],
 ): EmailConfig {
   const config: EmailConfig = {
     to: recipientEmail,
@@ -163,13 +148,7 @@ export function prepareEmailConfig(
     text: emailTemplate.text,
   };
 
-  // NOTA: Ya no adjuntamos el PDF porque ya no guardamos pdf_buffer
-  // El email ahora incluye un enlace de descarga a invoicePDF.pdf_url
-  // Si en el futuro necesitas adjuntar el PDF, puedes:
-  // 1. Descargar el PDF desde invoicePDF.pdf_url usando axios
-  // 2. Agregarlo como attachment
-
-  return config;
+  return attachments.length > 0 ? { ...config, attachments } : config;
 }
 
 /**
@@ -181,7 +160,32 @@ export function isValidEmail(email: string): boolean {
 }
 
 /**
- * Sends invoice email using configured email service
+ * Best-effort fetch of the signed XML for the invoice backing this PDF, to
+ * attach alongside it (SRI custom is PDF + XML). Returns undefined instead
+ * of throwing so a missing/unavailable XML never blocks sending the PDF,
+ * which is the actual deliverable.
+ */
+const buildXmlAttachment = async (invoicePDF: IInvoicePDF): Promise<EmailAttachment | undefined> => {
+  try {
+    const factura = await Invoice.findById(invoicePDF.factura_id);
+    if (!factura?.xml_firmado) {
+      return undefined;
+    }
+    return {
+      filename: `${invoicePDF.claveAcceso}.xml`,
+      content: Buffer.from(factura.xml_firmado, 'utf-8'),
+      contentType: 'application/xml',
+    };
+  } catch (error) {
+    console.warn('⚠️  No se pudo adjuntar el XML autorizado (se enviará solo el PDF):', error);
+    return undefined;
+  }
+};
+
+/**
+ * Sends invoice email using Resend, with the RIDE PDF always attached as a
+ * real file (fetched from the configured storage provider — S3 in
+ * production) and the authorized XML attached best-effort when available.
  */
 export async function sendInvoiceEmail(
   invoicePDF: IInvoicePDF,
@@ -196,36 +200,61 @@ export async function sendInvoiceEmail(
     }
 
     // Check if email is configured
-    if (!process.env.EMAIL_USER || !process.env.EMAIL_PASSWORD) {
+    const apiKey = process.env.RESEND_API_KEY;
+    const emailFrom = process.env.EMAIL_FROM;
+    if (!apiKey || !emailFrom) {
       console.warn('Email service not configured. Email sending is disabled.');
       return {
         success: false,
-        error: 'Servicio de email no configurado. Configure EMAIL_USER y EMAIL_PASSWORD.',
+        error: 'Servicio de email no configurado. Configure RESEND_API_KEY y EMAIL_FROM.',
       };
     }
 
     // Generate email template
     const template = generateInvoiceEmailTemplate(invoicePDF, clientName, companyName);
 
-    // Prepare email config
-    const emailConfig = prepareEmailConfig(invoicePDF, template, recipientEmail);
+    // Fetch the RIDE PDF bytes from the configured storage provider (S3 in
+    // production via GetObject) — the attachment is the deliverable, never
+    // a link.
+    const storage = PDFStorageFactory.create();
+    const pdfBuffer = await storage.getFileBuffer(invoicePDF.pdf_public_id);
 
-    // Create transporter and send email
-    const transporter = createTransporter();
-    const result = await transporter.sendMail({
-      from: process.env.EMAIL_USER,
-      ...emailConfig,
+    const attachments: EmailAttachment[] = [
+      { filename: `${invoicePDF.claveAcceso}.pdf`, content: pdfBuffer, contentType: 'application/pdf' },
+    ];
+
+    const xmlAttachment = await buildXmlAttachment(invoicePDF);
+    if (xmlAttachment) {
+      attachments.push(xmlAttachment);
+    }
+
+    // Prepare email config
+    const emailConfig = prepareEmailConfig(invoicePDF, template, recipientEmail, attachments);
+
+    // Send via Resend
+    const resend = new Resend(apiKey);
+    const { data, error } = await resend.emails.send({
+      from: emailFrom,
+      to: emailConfig.to,
+      subject: emailConfig.subject,
+      html: emailConfig.html,
+      text: emailConfig.text,
+      attachments: emailConfig.attachments,
     });
+
+    if (error) {
+      throw new Error(error.message);
+    }
 
     console.log('✅ Email sent successfully:', {
       to: emailConfig.to,
       subject: emailConfig.subject,
-      messageId: result.messageId,
+      messageId: data?.id,
     });
 
     return {
       success: true,
-      messageId: result.messageId,
+      messageId: data?.id,
     };
   } catch (error) {
     console.error('❌ Error sending email:', error);

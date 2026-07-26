@@ -4,162 +4,20 @@ export default {
     title: 'Sistema de Facturación Electrónica API',
     version: '1.0.0',
     description:
-      'API completa para el Sistema de Facturación Electrónica con integración al SRI Ecuador. Incluye generación automática de PDFs cuando el SRI confirma la recepción de facturas.',
+      'API multi-tenant de Facturación Electrónica con integración al SRI Ecuador. Incluye generación automática de PDFs cuando el SRI confirma la recepción de facturas. ' +
+      'Este documento cubre únicamente la API de facturación para sistemas cliente (`/api/v1/*`), autenticada con API key por tenant. ' +
+      'El backoffice de administración (`/admin/api/*`, JWT de administrador) y el flujo público de onboarding por invitación (`/onboarding/api/*`) existen y están en producción, ' +
+      'pero no se documentan aquí — ver README.md, SECURITY.md y CURL_EXAMPLES.md para esos flujos.',
   },
+  security: [{ ApiKeyAuth: [] }],
   paths: {
-    '/register': {
-      post: {
-        tags: ['Autenticación y Usuarios'],
-        summary: 'Registrar usuario y empresa',
-        description:
-          'Crea un usuario y su empresa asociada. Requiere clave maestra para el primer registro o código de invitación para registros posteriores.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': {
-              schema: { $ref: '#/components/schemas/UserRegistration' },
-            },
-          },
-        },
-        responses: {
-          '201': {
-            description: 'Usuario y empresa creados exitosamente',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    message: { type: 'string' },
-                    token: { type: 'string' },
-                    user: {
-                      type: 'object',
-                      properties: {
-                        id: { type: 'string' },
-                        email: { type: 'string' },
-                      },
-                    },
-                    company: {
-                      type: 'object',
-                      properties: {
-                        id: { type: 'string' },
-                        ruc: { type: 'string' },
-                        razon_social: { type: 'string' },
-                        nombre_comercial: { type: 'string' },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          '400': { description: 'Datos requeridos faltantes o formato de RUC inválido' },
-          '403': { description: 'Clave maestra o código de invitación inválido' },
-          '409': { description: 'Usuario o empresa ya existe' },
-          '500': { description: 'Error del servidor' },
-        },
-      },
-    },
-    '/auth': {
-      post: {
-        tags: ['Autenticación y Usuarios'],
-        summary: 'Autenticar usuario',
-        description: 'Autentica un usuario existente y devuelve token JWT con información de usuario y empresa.',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': { schema: { $ref: '#/components/schemas/AuthPayload' } },
-          },
-        },
-        responses: {
-          '200': {
-            description: 'Autenticación exitosa',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    token: { type: 'string' },
-                    user: {
-                      type: 'object',
-                      properties: {
-                        id: { type: 'string' },
-                        email: { type: 'string' },
-                      },
-                    },
-                    company: {
-                      type: 'object',
-                      properties: {
-                        id: { type: 'string' },
-                        ruc: { type: 'string' },
-                        razon_social: { type: 'string' },
-                        nombre_comercial: { type: 'string' },
-                      },
-                    },
-                  },
-                },
-              },
-            },
-          },
-          '400': { description: 'Email y contraseña requeridos' },
-          '401': { description: 'Credenciales inválidas' },
-          '500': { description: 'Error del servidor' },
-        },
-      },
-    },
-    '/status': {
-      get: {
-        tags: ['Autenticación y Usuarios'],
-        summary: 'Estado del sistema de registro',
-        description: 'Consulta el estado actual del sistema de registro y los requisitos de seguridad.',
-        responses: {
-          '200': {
-            description: 'Estado del sistema',
-            content: {
-              'application/json': {
-                schema: {
-                  type: 'object',
-                  properties: {
-                    firstRegistration: {
-                      type: 'boolean',
-                      description: 'true si este es el primer registro en el sistema',
-                    },
-                    registrationDisabled: {
-                      type: 'boolean',
-                      description: 'true si el registro está completamente deshabilitado',
-                    },
-                    requiresInvitation: {
-                      type: 'boolean',
-                      description: 'true si se requiere código de invitación',
-                    },
-                    masterKeyRequired: {
-                      type: 'boolean',
-                      description: 'true si se requiere clave maestra',
-                    },
-                  },
-                },
-              },
-            },
-          },
-          '500': { description: 'Error del servidor' },
-        },
-      },
-    },
     '/api/v1/identification-type': {
       get: {
         tags: ['Identification Type Management'],
         summary: 'List IdentificationType',
+        description:
+          'Global, read-only SRI catalog shared by every tenant. There is no create/update/delete endpoint on the public /api/v1 surface — catalog maintenance is an admin-only concern, not a per-tenant one.',
         responses: { '200': { description: 'OK' } },
-      },
-      post: {
-        tags: ['Identification Type Management'],
-        summary: 'Create TipoIdentificacion',
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': { schema: { $ref: '#/components/schemas/TipoIdentificacionPayload' } },
-          },
-        },
-        responses: { '201': { description: 'Created' } },
       },
     },
     '/api/v1/identification-type/{id}': {
@@ -167,58 +25,65 @@ export default {
         tags: ['Identification Type Management'],
         summary: 'Get TipoIdentificacion by id',
         parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'OK' } },
-      },
-      put: {
-        tags: ['Identification Type Management'],
-        summary: 'Update TipoIdentificacion',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        requestBody: {
-          required: true,
-          content: {
-            'application/json': { schema: { $ref: '#/components/schemas/TipoIdentificacionPayload' } },
-          },
-        },
-        responses: { '200': { description: 'Updated' } },
-      },
-      delete: {
-        tags: ['Identification Type Management'],
-        summary: 'Delete TipoIdentificacion',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'Deleted' } },
+        responses: { '200': { description: 'OK' }, '404': { description: 'Not found' } },
       },
     },
     '/api/v1/issuing-company': {
       get: {
         tags: ['Issuing Company Management'],
-        summary: 'List IssuingCompany',
-        responses: { '200': { description: 'OK' } },
-      },
-    },
-    '/api/v1/issuing-company/{id}': {
-      get: {
-        tags: ['Issuing Company Management'],
-        summary: 'Get EmpresaEmisora',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'OK' } },
+        summary: "Get the authenticated tenant's own company",
+        description:
+          'Tenant self-service: always resolves to the caller’s own IssuingCompany via the authenticated API key—there is no :id param and no way to look up another tenant’s company. certificate/certificate_password are never included in the response.',
+        responses: {
+          '200': {
+            description: 'OK',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/EmpresaEmisora' } } },
+          },
+          '401': { description: 'API key missing or invalid' },
+          '404': { description: "The authenticated tenant's company no longer exists" },
+        },
       },
       put: {
         tags: ['Issuing Company Management'],
-        summary: 'Update EmpresaEmisora',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
+        summary: "Update the authenticated tenant's own company profile",
+        description:
+          'Updates only the authenticated tenant’s own record, restricted to an explicit field whitelist. ruc, active, certificate, certificate_password and _id can never be changed through this endpoint—ruc is immutable tenant identity, active cannot be self-toggled, and certificate fields are only ever set via PUT /api/v1/issuing-company/certificate.',
         requestBody: {
           required: true,
           content: {
-            'application/json': { schema: { $ref: '#/components/schemas/EmpresaEmisoraPayload' } },
+            'application/json': { schema: { $ref: '#/components/schemas/IssuingCompanySelfServiceUpdatePayload' } },
           },
         },
-        responses: { '200': { description: 'Updated' } },
+        responses: {
+          '200': {
+            description: 'Updated',
+            content: { 'application/json': { schema: { $ref: '#/components/schemas/EmpresaEmisora' } } },
+          },
+          '401': { description: 'API key missing or invalid' },
+          '404': { description: "The authenticated tenant's company no longer exists" },
+        },
       },
-      delete: {
+    },
+    '/api/v1/issuing-company/certificate': {
+      put: {
         tags: ['Issuing Company Management'],
-        summary: 'Delete EmpresaEmisora',
-        parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
-        responses: { '200': { description: 'Deleted' } },
+        summary: "Upload/replace the authenticated tenant's P12 digital certificate",
+        description:
+          'Verifies the incoming P12 (base64) actually opens with the given password (see src/utils/certificate.utils.ts#verifyP12Password) before encrypting and storing both the certificate and its password on the authenticated tenant’s own company. Nothing is stored if the P12 does not open.',
+        requestBody: {
+          required: true,
+          content: {
+            'application/json': { schema: { $ref: '#/components/schemas/CertificateUploadPayload' } },
+          },
+        },
+        responses: {
+          '200': { description: 'Certificate updated' },
+          '400': {
+            description: 'certificate/certificate_password missing, or the P12 does not open with the given password',
+          },
+          '401': { description: 'API key missing or invalid' },
+          '404': { description: "The authenticated tenant's company no longer exists" },
+        },
       },
     },
     '/api/v1/client': {
@@ -664,7 +529,6 @@ export default {
         summary: 'Listar todos los PDFs generados',
         description:
           'Obtiene una lista de todos los PDFs de facturas que han sido generados automáticamente cuando el SRI confirma la recepción (estado RECIBIDA).',
-        security: [{ bearerAuth: [] }],
         responses: {
           '200': {
             description: 'Lista de PDFs obtenida exitosamente',
@@ -702,7 +566,6 @@ export default {
         tags: ['PDF Management'],
         summary: 'Obtener PDF por ID de factura',
         description: 'Busca el registro del PDF generado automáticamente para una factura específica usando su ID.',
-        security: [{ bearerAuth: [] }],
         parameters: [
           {
             name: 'facturaId',
@@ -731,7 +594,6 @@ export default {
         tags: ['PDF Management'],
         summary: 'Obtener PDF por clave de acceso',
         description: 'Busca el registro del PDF usando la clave de acceso de 49 dígitos de la factura electrónica.',
-        security: [{ bearerAuth: [] }],
         parameters: [
           {
             name: 'claveAcceso',
@@ -758,10 +620,9 @@ export default {
     '/api/v1/invoice-pdf/download/{claveAcceso}': {
       get: {
         tags: ['PDF Management'],
-        summary: 'Descargar el PDF (redirección a la URL pública)',
+        summary: 'Descargar el PDF (redirección a la URL de descarga)',
         description:
-          'Redirige (302) a la URL pública del PDF en el proveedor de almacenamiento configurado (Cloudinary, local, etc.).',
-        security: [{ bearerAuth: [] }],
+          'Redirige (302) a la URL de descarga del PDF en el proveedor de almacenamiento configurado (S3 mediante una URL presignada de corta duración por defecto; Cloudinary/local como alternativas).',
         parameters: [
           {
             name: 'claveAcceso',
@@ -785,7 +646,6 @@ export default {
         summary: 'Solicitar regeneración del PDF de una factura',
         description:
           'Registra una solicitud de regeneración del PDF. Actualmente responde con un acuse de recibo; la regeneración automática está planificada.',
-        security: [{ bearerAuth: [] }],
         parameters: [
           {
             name: 'facturaId',
@@ -808,7 +668,6 @@ export default {
         summary: 'Solicitar el envío del PDF por email',
         description:
           'Marca el PDF para envío por email al destinatario indicado (estado PENDIENTE). El envío se procesa de forma asíncrona.',
-        security: [{ bearerAuth: [] }],
         parameters: [
           {
             name: 'claveAcceso',
@@ -845,7 +704,6 @@ export default {
       get: {
         tags: ['PDF Management'],
         summary: 'Consultar el estado de envío por email de un PDF',
-        security: [{ bearerAuth: [] }],
         parameters: [
           {
             name: 'claveAcceso',
@@ -885,7 +743,6 @@ export default {
         tags: ['PDF Management'],
         summary: 'Reintentar el envío por email de un PDF',
         description: 'Reinicia el estado de envío a PENDIENTE para un PDF cuyo email falló o no se ha enviado.',
-        security: [{ bearerAuth: [] }],
         parameters: [
           {
             name: 'claveAcceso',
@@ -916,10 +773,6 @@ export default {
         'Gestión de PDFs generados automáticamente. Los PDFs se crean automáticamente cuando el SRI confirma la recepción de facturas (estado RECIBIDA).',
     },
     {
-      name: 'Autenticación y Usuarios',
-      description: 'Endpoints for user registration and authentication.',
-    },
-    {
       name: 'Identification Type Management',
       description: 'Endpoints to manage identification types.',
     },
@@ -946,11 +799,13 @@ export default {
   ],
   components: {
     securitySchemes: {
-      bearerAuth: {
-        type: 'http',
-        scheme: 'bearer',
-        bearerFormat: 'JWT',
-        description: 'Token JWT obtenido del endpoint /auth',
+      ApiKeyAuth: {
+        type: 'apiKey',
+        in: 'header',
+        name: 'X-API-Key',
+        description:
+          'API key por tenant (formato sk_live_...), provisionada desde el backoffice de administración. ' +
+          'También puede enviarse como "Authorization: Bearer sk_live_...". Ver src/middleware/apiKeyAuth.ts.',
       },
     },
     schemas: {
@@ -1431,67 +1286,34 @@ export default {
         },
         required: ['codigoInterno', 'descripcion', 'cantidad', 'precioUnitario', 'precioTotalSinImpuesto', 'impuestos'],
       },
-      UserRegistration: {
+      IssuingCompanySelfServiceUpdatePayload: {
         type: 'object',
+        description:
+          'Whitelisted fields a tenant may update about its own company profile (src/routes/issuingCompany.ts#UPDATABLE_FIELDS). Any other field in the body, including ruc, active, certificate, certificate_password or _id, is silently ignored.',
         properties: {
-          // User data
-          email: { type: 'string', example: 'admin@empresa.com' },
-          password: { type: 'string', example: 'password123' },
-          // Company data
-          ruc: { type: 'string', example: '1234567890001' },
-          razon_social: { type: 'string', example: 'Mi Empresa S.A.' },
-          nombre_comercial: { type: 'string', example: 'Mi Empresa' },
-          direccion: { type: 'string', example: 'Av. Principal 123' },
-          telefono: { type: 'string', example: '0999999999' },
-          codigo_establecimiento: { type: 'string', example: '001' },
-          punto_emision: { type: 'string', example: '001' },
-          tipo_ambiente: { type: 'number', example: 1, description: '1=Pruebas, 2=Producción' },
-          tipo_emision: { type: 'number', example: 1, description: '1=Normal' },
-          certificate: { type: 'string', description: 'Certificado digital en base64' },
-          certificatePassword: { type: 'string', example: 'password_certificado' },
-          certificatePath: {
-            type: 'string',
-            description: 'Ruta al archivo de certificado (alternativa a certificate)',
-          },
-          // Security
-          masterKey: {
-            type: 'string',
-            example: 'clave_maestra_secreta',
-            description: 'Requerida para el primer registro',
-          },
-          invitationCode: {
-            type: 'string',
-            example: 'INV2024001',
-            description: 'Código de invitación para registros posteriores',
-          },
-        },
-        required: ['email', 'password', 'ruc', 'razon_social'],
-      },
-      AuthPayload: {
-        type: 'object',
-        properties: {
-          email: { type: 'string', example: 'user@example.com' },
-          password: { type: 'string', example: 'password123' },
-        },
-        required: ['email', 'password'],
-      },
-      TipoIdentificacionPayload: {
-        type: 'object',
-        properties: {
-          codigo: { type: 'string', example: '01' },
-          descripcion: { type: 'string', example: 'RUC' },
-        },
-        required: ['codigo', 'descripcion'],
-      },
-      EmpresaEmisoraPayload: {
-        type: 'object',
-        properties: {
-          ruc: { type: 'string', example: '0123456789001' },
           razon_social: { type: 'string', example: 'Mi Empresa S.A.' },
           nombre_comercial: { type: 'string', example: 'Mi Tienda' },
-          // Add more fields according to your IssuingCompany model
+          direccion: { type: 'string' },
+          direccion_matriz: { type: 'string' },
+          direccion_establecimiento: { type: 'string' },
+          telefono: { type: 'string' },
+          email: { type: 'string' },
+          email_notificacion: { type: 'string' },
+          codigo_establecimiento: { type: 'string', example: '001' },
+          punto_emision: { type: 'string', example: '001' },
+          tipo_ambiente: { type: 'number', example: 1 },
+          tipo_emision: { type: 'number', example: 1 },
+          obligado_contabilidad: { type: 'boolean' },
+          contribuyente_especial: { type: 'string' },
         },
-        required: ['ruc', 'razon_social'],
+      },
+      CertificateUploadPayload: {
+        type: 'object',
+        properties: {
+          certificate: { type: 'string', description: 'P12 digital certificate, base64-encoded' },
+          certificate_password: { type: 'string' },
+        },
+        required: ['certificate', 'certificate_password'],
       },
       ClientePayload: {
         type: 'object',

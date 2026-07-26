@@ -5,7 +5,12 @@ import mongoose, { Schema, Document } from 'mongoose';
  *
  * IMPORTANTE: Este modelo ya NO almacena el pdf_buffer en la base de datos
  * para evitar problemas de tamaño. En su lugar, almacena:
- * - pdf_url: URL pública del PDF (en Cloudinary, local, etc.)
+ * - pdf_url: con PDF_STORAGE_PROVIDER=s3 (default recomendado en
+ *   producción), esto NO es una URL pública: es la key del objeto en el
+ *   bucket privado de S3 (ver src/services/storage/s3.storage.ts), y las
+ *   descargas se sirven vía URLs presignadas de corta duración generadas
+ *   bajo demanda, nunca esta cadena directamente. Solo es una URL pública
+ *   real con los proveedores cloudinary/local.
  * - pdf_public_id: ID único para gestionar el archivo
  * - pdf_provider: Proveedor utilizado (cloudinary, local, s3, etc.)
  */
@@ -14,7 +19,7 @@ export interface IInvoicePDF extends Document {
   claveAcceso: string;
 
   // Información del almacenamiento (sin buffer)
-  pdf_url: string; // URL pública del PDF
+  pdf_url: string; // Key de S3 (proveedor s3) o URL pública (cloudinary/local) -- ver comentario arriba
   pdf_public_id: string; // ID único en el proveedor (para eliminar/actualizar)
   pdf_provider: string; // Proveedor: cloudinary, local, s3, azure, etc.
 
@@ -38,7 +43,7 @@ const InvoicePDFSchema: Schema = new Schema({
   claveAcceso: { type: String, required: true, unique: true },
 
   // Campos actualizados para el nuevo sistema de almacenamiento
-  pdf_url: { type: String, required: true }, // URL pública del PDF
+  pdf_url: { type: String, required: true }, // Key de S3 o URL pública -- ver el comentario en IInvoicePDF arriba
   pdf_public_id: { type: String, required: true }, // ID único en el proveedor
   pdf_provider: { type: String, required: true, default: 'local' }, // Proveedor de almacenamiento
 

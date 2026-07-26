@@ -6,12 +6,15 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, AutorizacionSRI, Respues
 import { generateDebitNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
+import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import DebitNote from '../models/DebitNote';
 import DebitNotePDF from '../models/DebitNotePDF';
 import Invoice from '../models/Invoice';
-import IssuingCompany from '../models/IssuingCompany';
 import { IClient } from '../models/Client';
-import fs from 'fs';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con notas de débito (codDoc 05)
@@ -36,29 +39,16 @@ export class DebitNoteService {
 
   /**
    * Genera el siguiente secuencial de nota de débito para una empresa
+   * (codDoc '05'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaNota = await DebitNote.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaNota) {
-      const siguiente = parseInt(ultimaNota.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '05');
   }
 
   /**
    * Valida y resuelve todas las entidades necesarias para emitir la nota de débito
    */
-  static async procesarNotaDebitoCompleta(datos: DebitNoteRequest) {
+  static async procesarNotaDebitoCompleta(datos: DebitNoteRequest, companyId: string) {
     if (!this.validarDatosNotaDebito(datos)) {
       throw new Error('Datos de nota de débito inválidos o incompletos');
     }
@@ -68,17 +58,14 @@ export class DebitNoteService {
       throw new Error('Identification type not found');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const cliente = await InvoiceService.buscarClient(datos.infoNotaDebito.identificacionComprador);
+    const cliente = await InvoiceService.buscarClient(datos.infoNotaDebito.identificacionComprador, companyId);
     if (!cliente) {
       throw new Error('Client not found');
     }
 
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoNotaDebito.fechaEmision);
     const fechaEmisionDocSustento = convertirFecha(datos.infoNotaDebito.fechaEmisionDocSustento);
 
@@ -106,11 +93,12 @@ export class DebitNoteService {
    * Procesa y guarda una nota de débito completa,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos de la nota de débito recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns La nota de débito creada
    */
-  static async crearNotaDebitoCompleta(datos: DebitNoteRequest) {
+  static async crearNotaDebitoCompleta(datos: DebitNoteRequest, companyId: string) {
     const { empresa, cliente, secuencial, fechaEmision, fechaEmisionDocSustento, facturaModificada } =
-      await this.procesarNotaDebitoCompleta(datos);
+      await this.procesarNotaDebitoCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({
@@ -152,9 +140,19 @@ export class DebitNoteService {
 
     await notaDebito.save();
 
-    this.procesarEnvioSRI(notaDebito, empresa, cliente, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '05',
+      documentId: String(notaDebito._id),
+      claveAcceso: notaDebito.clave_acceso,
+      sriEstado: 'PENDIENTE',
     });
+
+    trackBackgroundWork(
+      this.procesarEnvioSRI(notaDebito, empresa, cliente, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     return {
       nota_debito: notaDebito,
@@ -177,33 +175,23 @@ export class DebitNoteService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
-
-      if (!p12Path || !fs.existsSync(p12Path)) {
+      if (!empresa.certificate || !empresa.certificate_password) {
         notaDebito.sri_estado = 'ERROR_FIRMA';
         notaDebito.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await notaDebito.save();
+        recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
         return;
       }
 
       try {
-        const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-        if (!diagnosis.isValidP12) {
-          throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-        }
-
-        let workingPassword = p12Password;
-        const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-        if (!passwordVerification.valid) {
-          const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-          if (passwordSearch.password === null) {
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
+          if (!passwordVerification.valid) {
             throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
-          workingPassword = passwordSearch.password;
-        }
 
-        const xmlFirmado = await firmarXML(notaDebito.xml, p12Path, workingPassword, '05');
+          return firmarXML(notaDebito.xml, p12Path, p12Password, '05');
+        });
 
         notaDebito.xml_firmado = xmlFirmado;
         notaDebito.sri_fecha_envio = new Date();
@@ -217,6 +205,7 @@ export class DebitNoteService {
           notaDebito.sri_mensajes = respuestaSRI.mensajes;
         }
         await notaDebito.save();
+        recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -232,12 +221,14 @@ export class DebitNoteService {
         notaDebito.sri_estado = 'ERROR_FIRMA';
         notaDebito.sri_mensajes = { error: error.message };
         await notaDebito.save();
+        recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       notaDebito.sri_estado = 'ERROR_PROCESO';
       notaDebito.sri_mensajes = { error: error.message };
       await notaDebito.save();
+      recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
     }
   }
 
@@ -246,6 +237,7 @@ export class DebitNoteService {
    */
   static programarConsultaAutorizacion(notaDebitoId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
     const timer = setTimeout(async () => {
+      unregisterScheduledCheck(timer);
       try {
         const resultado = await DebitNoteService.consultarAutorizacionSRI(notaDebitoId);
         const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
@@ -258,7 +250,12 @@ export class DebitNoteService {
       }
     }, delayMs);
 
+    // Do not keep the process alive because of the scheduled check. Also
+    // registered with scheduledCheck.utils so a test that forgets to mock
+    // this away can't leave a real timer pending into a later, unrelated
+    // test — see that module's doc comment.
     timer.unref?.();
+    registerScheduledCheck(timer);
   }
 
   /**
@@ -290,6 +287,7 @@ export class DebitNoteService {
       }
 
       await notaDebito.save();
+      recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

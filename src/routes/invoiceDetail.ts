@@ -1,10 +1,20 @@
 import { Router } from 'express';
 import InvoiceDetail from '../models/InvoiceDetail';
+import Invoice from '../models/Invoice';
+import { getTenantCompanyId } from '../utils/tenant.utils';
 
 const router = Router();
 
+// InvoiceDetail carries no tenant field of its own — it's keyed by
+// factura_id (ref Invoice). Every endpoint here scopes access by first
+// confirming the referenced Invoice belongs to the authenticated tenant.
+
 router.post('/', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
+    const factura = await Invoice.findOne({ _id: req.body.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'Not found' });
+
     const doc = new InvoiceDetail(req.body);
     await doc.save();
     res.status(201).json(doc);
@@ -13,9 +23,11 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const docs = await InvoiceDetail.find();
+    const companyId = getTenantCompanyId(req);
+    const facturaIds = await Invoice.find({ empresa_emisora_id: companyId }).distinct('_id');
+    const docs = await InvoiceDetail.find({ factura_id: { $in: facturaIds } });
     res.json(docs);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -24,8 +36,13 @@ router.get('/', async (_req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
     const doc = await InvoiceDetail.findById(req.params.id);
     if (!doc) return res.status(404).json({ message: 'Not found' });
+
+    const factura = await Invoice.findOne({ _id: doc.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'Not found' });
+
     res.json(doc);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -34,7 +51,19 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const doc = await InvoiceDetail.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const companyId = getTenantCompanyId(req);
+    const existing = await InvoiceDetail.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: 'Not found' });
+
+    const factura = await Invoice.findOne({ _id: existing.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'Not found' });
+
+    // factura_id IS this model's tenant-linking field (InvoiceDetail carries
+    // no empresa_emisora_id of its own) — it must never be settable from the
+    // request body, or a tenant could reparent its own detail line onto
+    // another tenant's invoice by simply naming that invoice's id.
+    const { factura_id: _ignoredFacturaId, ...updateData } = req.body;
+    const doc = await InvoiceDetail.findByIdAndUpdate(req.params.id, updateData, { new: true });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -44,6 +73,13 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
+    const existing = await InvoiceDetail.findById(req.params.id);
+    if (!existing) return res.status(404).json({ message: 'Not found' });
+
+    const factura = await Invoice.findOne({ _id: existing.factura_id, empresa_emisora_id: companyId });
+    if (!factura) return res.status(404).json({ message: 'Not found' });
+
     const doc = await InvoiceDetail.findByIdAndDelete(req.params.id);
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json({ message: 'Deleted' });

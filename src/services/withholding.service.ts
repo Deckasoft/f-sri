@@ -6,10 +6,13 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, AutorizacionSRI, Respues
 import { generateWithholdingPDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
+import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import Withholding from '../models/Withholding';
 import WithholdingPDF from '../models/WithholdingPDF';
-import IssuingCompany from '../models/IssuingCompany';
-import fs from 'fs';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con
@@ -42,40 +45,24 @@ export class WithholdingService {
   }
 
   /**
-   * Genera el siguiente secuencial de comprobante de retención para una empresa
+   * Genera el siguiente secuencial de comprobante de retención para una
+   * empresa (codDoc '07'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaRetencion = await Withholding.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaRetencion) {
-      const siguiente = parseInt(ultimaRetencion.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '07');
   }
 
   /**
    * Valida y resuelve todas las entidades necesarias para emitir el comprobante
    */
-  static async procesarRetencionCompleta(datos: WithholdingRequest) {
+  static async procesarRetencionCompleta(datos: WithholdingRequest, companyId: string) {
     if (!this.validarDatosRetencion(datos)) {
       throw new Error('Datos de comprobante de retención inválidos o incompletos');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoCompRetencion.fechaEmision);
 
     if (isNaN(fechaEmision.getTime())) {
@@ -93,10 +80,11 @@ export class WithholdingService {
    * Procesa y guarda un comprobante de retención completo,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos del comprobante de retención recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns El comprobante de retención creado
    */
-  static async crearRetencionCompleta(datos: WithholdingRequest) {
-    const { empresa, secuencial, fechaEmision } = await this.procesarRetencionCompleta(datos);
+  static async crearRetencionCompleta(datos: WithholdingRequest, companyId: string) {
+    const { empresa, secuencial, fechaEmision } = await this.procesarRetencionCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({
@@ -135,9 +123,19 @@ export class WithholdingService {
 
     await retencion.save();
 
-    this.procesarEnvioSRI(retencion, empresa, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '07',
+      documentId: String(retencion._id),
+      claveAcceso: retencion.clave_acceso,
+      sriEstado: 'PENDIENTE',
     });
+
+    trackBackgroundWork(
+      this.procesarEnvioSRI(retencion, empresa, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     return {
       retencion,
@@ -155,33 +153,23 @@ export class WithholdingService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
-
-      if (!p12Path || !fs.existsSync(p12Path)) {
+      if (!empresa.certificate || !empresa.certificate_password) {
         retencion.sri_estado = 'ERROR_FIRMA';
         retencion.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await retencion.save();
+        recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
         return;
       }
 
       try {
-        const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-        if (!diagnosis.isValidP12) {
-          throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-        }
-
-        let workingPassword = p12Password;
-        const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-        if (!passwordVerification.valid) {
-          const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-          if (passwordSearch.password === null) {
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
+          if (!passwordVerification.valid) {
             throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
-          workingPassword = passwordSearch.password;
-        }
 
-        const xmlFirmado = await firmarXML(retencion.xml, p12Path, workingPassword, '07');
+          return firmarXML(retencion.xml, p12Path, p12Password, '07');
+        });
 
         retencion.xml_firmado = xmlFirmado;
         retencion.sri_fecha_envio = new Date();
@@ -195,6 +183,7 @@ export class WithholdingService {
           retencion.sri_mensajes = respuestaSRI.mensajes;
         }
         await retencion.save();
+        recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -210,12 +199,14 @@ export class WithholdingService {
         retencion.sri_estado = 'ERROR_FIRMA';
         retencion.sri_mensajes = { error: error.message };
         await retencion.save();
+        recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       retencion.sri_estado = 'ERROR_PROCESO';
       retencion.sri_mensajes = { error: error.message };
       await retencion.save();
+      recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
     }
   }
 
@@ -224,6 +215,7 @@ export class WithholdingService {
    */
   static programarConsultaAutorizacion(retencionId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
     const timer = setTimeout(async () => {
+      unregisterScheduledCheck(timer);
       try {
         const resultado = await WithholdingService.consultarAutorizacionSRI(retencionId);
         const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
@@ -236,7 +228,12 @@ export class WithholdingService {
       }
     }, delayMs);
 
+    // Do not keep the process alive because of the scheduled check. Also
+    // registered with scheduledCheck.utils so a test that forgets to mock
+    // this away can't leave a real timer pending into a later, unrelated
+    // test — see that module's doc comment.
     timer.unref?.();
+    registerScheduledCheck(timer);
   }
 
   /**
@@ -266,6 +263,7 @@ export class WithholdingService {
       }
 
       await retencion.save();
+      recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

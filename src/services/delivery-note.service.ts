@@ -6,10 +6,13 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, AutorizacionSRI, Respues
 import { generateDeliveryNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
+import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import DeliveryNote from '../models/DeliveryNote';
 import DeliveryNotePDF from '../models/DeliveryNotePDF';
-import IssuingCompany from '../models/IssuingCompany';
-import fs from 'fs';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con guías de remisión (codDoc 06)
@@ -34,39 +37,23 @@ export class DeliveryNoteService {
 
   /**
    * Genera el siguiente secuencial de guía de remisión para una empresa
+   * (codDoc '06'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaGuia = await DeliveryNote.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaGuia) {
-      const siguiente = parseInt(ultimaGuia.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '06');
   }
 
   /**
    * Valida y resuelve todas las entidades necesarias para emitir la guía de remisión
    */
-  static async procesarGuiaRemisionCompleta(datos: DeliveryNoteRequest) {
+  static async procesarGuiaRemisionCompleta(datos: DeliveryNoteRequest, companyId: string) {
     if (!this.validarDatosGuiaRemision(datos)) {
       throw new Error('Datos de guía de remisión inválidos o incompletos');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoGuiaRemision.fechaEmision);
     const fechaIniTransporte = convertirFecha(datos.infoGuiaRemision.fechaIniTransporte);
     const fechaFinTransporte = convertirFecha(datos.infoGuiaRemision.fechaFinTransporte);
@@ -88,11 +75,12 @@ export class DeliveryNoteService {
    * Procesa y guarda una guía de remisión completa,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos de la guía de remisión recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns La guía de remisión creada
    */
-  static async crearGuiaRemisionCompleta(datos: DeliveryNoteRequest) {
+  static async crearGuiaRemisionCompleta(datos: DeliveryNoteRequest, companyId: string) {
     const { empresa, secuencial, fechaEmision, fechaIniTransporte, fechaFinTransporte } =
-      await this.procesarGuiaRemisionCompleta(datos);
+      await this.procesarGuiaRemisionCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({
@@ -129,9 +117,19 @@ export class DeliveryNoteService {
 
     await guiaRemision.save();
 
-    this.procesarEnvioSRI(guiaRemision, empresa, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '06',
+      documentId: String(guiaRemision._id),
+      claveAcceso: guiaRemision.clave_acceso,
+      sriEstado: 'PENDIENTE',
     });
+
+    trackBackgroundWork(
+      this.procesarEnvioSRI(guiaRemision, empresa, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     return {
       guia_remision: guiaRemision,
@@ -149,33 +147,23 @@ export class DeliveryNoteService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
-
-      if (!p12Path || !fs.existsSync(p12Path)) {
+      if (!empresa.certificate || !empresa.certificate_password) {
         guiaRemision.sri_estado = 'ERROR_FIRMA';
         guiaRemision.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await guiaRemision.save();
+        recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
         return;
       }
 
       try {
-        const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-        if (!diagnosis.isValidP12) {
-          throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-        }
-
-        let workingPassword = p12Password;
-        const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-        if (!passwordVerification.valid) {
-          const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-          if (passwordSearch.password === null) {
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
+          if (!passwordVerification.valid) {
             throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
-          workingPassword = passwordSearch.password;
-        }
 
-        const xmlFirmado = await firmarXML(guiaRemision.xml, p12Path, workingPassword, '06');
+          return firmarXML(guiaRemision.xml, p12Path, p12Password, '06');
+        });
 
         guiaRemision.xml_firmado = xmlFirmado;
         guiaRemision.sri_fecha_envio = new Date();
@@ -189,6 +177,7 @@ export class DeliveryNoteService {
           guiaRemision.sri_mensajes = respuestaSRI.mensajes;
         }
         await guiaRemision.save();
+        recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -204,12 +193,14 @@ export class DeliveryNoteService {
         guiaRemision.sri_estado = 'ERROR_FIRMA';
         guiaRemision.sri_mensajes = { error: error.message };
         await guiaRemision.save();
+        recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       guiaRemision.sri_estado = 'ERROR_PROCESO';
       guiaRemision.sri_mensajes = { error: error.message };
       await guiaRemision.save();
+      recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
     }
   }
 
@@ -218,6 +209,7 @@ export class DeliveryNoteService {
    */
   static programarConsultaAutorizacion(guiaRemisionId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
     const timer = setTimeout(async () => {
+      unregisterScheduledCheck(timer);
       try {
         const resultado = await DeliveryNoteService.consultarAutorizacionSRI(guiaRemisionId);
         const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
@@ -230,7 +222,12 @@ export class DeliveryNoteService {
       }
     }, delayMs);
 
+    // Do not keep the process alive because of the scheduled check. Also
+    // registered with scheduledCheck.utils so a test that forgets to mock
+    // this away can't leave a real timer pending into a later, unrelated
+    // test — see that module's doc comment.
     timer.unref?.();
+    registerScheduledCheck(timer);
   }
 
   /**
@@ -262,6 +259,7 @@ export class DeliveryNoteService {
       }
 
       await guiaRemision.save();
+      recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

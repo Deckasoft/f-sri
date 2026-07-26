@@ -6,14 +6,17 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, AutorizacionSRI, Respues
 import { generateCreditNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
+import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
+import { getNextSecuencial } from '../utils/sequence.utils';
+import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { trackBackgroundWork } from '../utils/backgroundWork.utils';
+import { recordEmission, recordSriOutcome } from './usage.service';
 import CreditNote from '../models/CreditNote';
 import CreditNoteDetail from '../models/CreditNoteDetail';
 import CreditNotePDF from '../models/CreditNotePDF';
 import Invoice from '../models/Invoice';
-import IssuingCompany from '../models/IssuingCompany';
 import { IClient } from '../models/Client';
 import { IProduct } from '../models/Product';
-import fs from 'fs';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con notas de crédito (codDoc 04)
@@ -35,33 +38,21 @@ export class CreditNoteService {
 
   /**
    * Genera el siguiente secuencial de nota de crédito para una empresa
+   * (codDoc '04'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(rucCompany: string): Promise<string> {
-    const empresa = await IssuingCompany.findOne({ ruc: rucCompany });
-    if (!empresa) {
-      throw new Error(`Empresa with RUC ${rucCompany} not found`);
-    }
-
-    const ultimaNota = await CreditNote.findOne({
-      empresa_emisora_id: empresa._id,
-    }).sort({ secuencial: -1 });
-
-    let secuencial = '000000001';
-    if (ultimaNota) {
-      const siguiente = parseInt(ultimaNota.secuencial) + 1;
-      secuencial = siguiente.toString().padStart(9, '0');
-    }
-    return secuencial;
+  static async generarSecuencial(companyId: string): Promise<string> {
+    return getNextSecuencial(companyId, '04');
   }
 
   /**
-   * Busca todos los productos listados en los detalles de una nota de crédito
+   * Busca todos los productos listados en los detalles de una nota de crédito,
+   * dentro del tenant autenticado
    */
-  static async buscarProducts(detalles: CreditNoteProductDetail[]): Promise<IProduct[]> {
+  static async buscarProducts(detalles: CreditNoteProductDetail[], companyId: string): Promise<IProduct[]> {
     const productos = [];
     for (const det of detalles) {
       const codigo = det.detalle?.codigoInterno;
-      const producto = await InvoiceService.buscarProduct(codigo);
+      const producto = await InvoiceService.buscarProduct(codigo, companyId);
       if (!producto) {
         throw new Error(`Product not found: ${codigo}`);
       }
@@ -73,7 +64,7 @@ export class CreditNoteService {
   /**
    * Valida y resuelve todas las entidades necesarias para emitir la nota de crédito
    */
-  static async procesarNotaCreditoCompleta(datos: CreditNoteRequest) {
+  static async procesarNotaCreditoCompleta(datos: CreditNoteRequest, companyId: string) {
     if (!this.validarDatosNotaCredito(datos)) {
       throw new Error('Datos de nota de crédito inválidos o incompletos');
     }
@@ -83,18 +74,15 @@ export class CreditNoteService {
       throw new Error('Identification type not found');
     }
 
-    const empresa = await InvoiceService.buscarIssuingCompany(datos.infoTributaria.ruc);
-    if (!empresa) {
-      throw new Error('Empresa emisora no encontrada');
-    }
+    const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const cliente = await InvoiceService.buscarClient(datos.infoNotaCredito.identificacionComprador);
+    const cliente = await InvoiceService.buscarClient(datos.infoNotaCredito.identificacionComprador, companyId);
     if (!cliente) {
       throw new Error('Client not found');
     }
 
-    const productos = await this.buscarProducts(datos.detalles);
-    const secuencial = await this.generarSecuencial(empresa.ruc);
+    const productos = await this.buscarProducts(datos.detalles, companyId);
+    const secuencial = await this.generarSecuencial(companyId);
     const fechaEmision = convertirFecha(datos.infoNotaCredito.fechaEmision);
     const fechaEmisionDocSustento = convertirFecha(datos.infoNotaCredito.fechaEmisionDocSustento);
 
@@ -123,11 +111,12 @@ export class CreditNoteService {
    * Procesa y guarda una nota de crédito completa con todos sus detalles,
    * y dispara el envío asíncrono al SRI
    * @param datos Los datos de la nota de crédito recibidos del cliente
+   * @param companyId El id de la empresa emisora autenticada (req.auth.companyId)
    * @returns La nota de crédito creada y sus detalles
    */
-  static async crearNotaCreditoCompleta(datos: CreditNoteRequest) {
+  static async crearNotaCreditoCompleta(datos: CreditNoteRequest, companyId: string) {
     const { empresa, cliente, productos, secuencial, fechaEmision, fechaEmisionDocSustento, facturaModificada } =
-      await this.procesarNotaCreditoCompleta(datos);
+      await this.procesarNotaCreditoCompleta(datos, companyId);
 
     const serie = `${empresa.codigo_establecimiento}${empresa.punto_emision}`;
     const claveAcceso = generarClaveAcceso({
@@ -169,9 +158,19 @@ export class CreditNoteService {
 
     await notaCredito.save();
 
-    this.procesarEnvioSRI(notaCredito, empresa, cliente, productos, datos).catch((error) => {
-      console.error('Error in asynchronous SRI sending process:', error);
+    recordEmission({
+      empresaEmisoraId: String(empresa._id),
+      documentType: '04',
+      documentId: String(notaCredito._id),
+      claveAcceso: notaCredito.clave_acceso,
+      sriEstado: 'PENDIENTE',
     });
+
+    trackBackgroundWork(
+      this.procesarEnvioSRI(notaCredito, empresa, cliente, productos, datos).catch((error) => {
+        console.error('Error in asynchronous SRI sending process:', error);
+      }),
+    );
 
     const detallesGuardados = await this.crearDetallesNotaCredito(notaCredito._id, datos.detalles, productos);
 
@@ -228,33 +227,23 @@ export class CreditNoteService {
     let respuestaSRI: RespuestaSRI | null = null;
 
     try {
-      const p12Path = empresa.certificatePath;
-      const p12Password = empresa.certificatePassword || '';
-
-      if (!p12Path || !fs.existsSync(p12Path)) {
+      if (!empresa.certificate || !empresa.certificate_password) {
         notaCredito.sri_estado = 'ERROR_FIRMA';
         notaCredito.sri_mensajes = { mensaje: 'Certificate not found for signing' };
         await notaCredito.save();
+        recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
         return;
       }
 
       try {
-        const diagnosis = await InvoiceService.diagnoseP12Certificate(p12Path, p12Password);
-        if (!diagnosis.isValidP12) {
-          throw new Error(`El archivo P12 no es válido: ${diagnosis.error}`);
-        }
-
-        let workingPassword = p12Password;
-        const passwordVerification = await InvoiceService.verifyP12Password(p12Path, p12Password);
-        if (!passwordVerification.valid) {
-          const passwordSearch = await InvoiceService.findWorkingP12Password(p12Path, p12Password);
-          if (passwordSearch.password === null) {
+        const xmlFirmado = await withCompanyP12(empresa, async (p12Path, p12Password) => {
+          const passwordVerification = await verifyP12Password(p12Path, p12Password);
+          if (!passwordVerification.valid) {
             throw new Error(`Error de contraseña del certificado P12: ${passwordVerification.error}`);
           }
-          workingPassword = passwordSearch.password;
-        }
 
-        const xmlFirmado = await firmarXML(notaCredito.xml, p12Path, workingPassword, '04');
+          return firmarXML(notaCredito.xml, p12Path, p12Password, '04');
+        });
 
         notaCredito.xml_firmado = xmlFirmado;
         notaCredito.sri_fecha_envio = new Date();
@@ -268,6 +257,7 @@ export class CreditNoteService {
           notaCredito.sri_mensajes = respuestaSRI.mensajes;
         }
         await notaCredito.save();
+        recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
 
         if (respuestaSRI.estado === 'RECIBIDA') {
           console.log(
@@ -283,12 +273,14 @@ export class CreditNoteService {
         notaCredito.sri_estado = 'ERROR_FIRMA';
         notaCredito.sri_mensajes = { error: error.message };
         await notaCredito.save();
+        recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
       }
     } catch (error: any) {
       console.error('Error during signing or sending to SRI:', error.message);
       notaCredito.sri_estado = 'ERROR_PROCESO';
       notaCredito.sri_mensajes = { error: error.message };
       await notaCredito.save();
+      recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
     }
   }
 
@@ -297,6 +289,7 @@ export class CreditNoteService {
    */
   static programarConsultaAutorizacion(notaCreditoId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
     const timer = setTimeout(async () => {
+      unregisterScheduledCheck(timer);
       try {
         const resultado = await CreditNoteService.consultarAutorizacionSRI(notaCreditoId);
         const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
@@ -309,7 +302,12 @@ export class CreditNoteService {
       }
     }, delayMs);
 
+    // Do not keep the process alive because of the scheduled check. Also
+    // registered with scheduledCheck.utils so a test that forgets to mock
+    // this away can't leave a real timer pending into a later, unrelated
+    // test — see that module's doc comment.
     timer.unref?.();
+    registerScheduledCheck(timer);
   }
 
   /**
@@ -341,6 +339,7 @@ export class CreditNoteService {
       }
 
       await notaCredito.save();
+      recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

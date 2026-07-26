@@ -1,0 +1,75 @@
+# Production compose file for the Hostinger VPS. Distinct from compose.yml
+# (dev-only: mongo + mongo-express with hardcoded weak credentials) — do not
+# merge the two. There is NO mongo service here: production data lives in
+# MongoDB Atlas, reached via MONGO_URI in .env.production (see
+# DEPLOYMENT.md for allowlisting the VPS's IP in Atlas). The container is
+# stateless — no PDF volume — because PDF_STORAGE_PROVIDER=s3 is the
+# production default (see .env.example); nothing here should reintroduce a
+# `local`-storage volume.
+#
+# Usage on the VPS:
+#   docker compose -f compose.prod.yml pull
+#   docker compose -f compose.prod.yml up -d
+#
+# The image is built and pushed to GHCR by .github/workflows/ci.yml on every
+# push to main (see the `docker` job), which publishes to
+# ghcr.io/<owner>/<repo> lowercased (GHCR/Docker registry paths must be all
+# lowercase; the workflow lowercases `github.repository` before using it).
+# For this repo (github.com/Deckasoft/f-sri) that's ghcr.io/deckasoft/f-sri —
+# the default below matches it. GHCR packages default to PRIVATE visibility:
+# see DEPLOYMENT.md section 4 for the two ways to make `docker compose pull`
+# succeed on the VPS (docker login ghcr.io with a PAT, or make the package
+# public).
+
+services:
+  api:
+    image: ${GHCR_IMAGE:-ghcr.io/deckasoft/f-sri:latest}
+    restart: always
+    env_file:
+      - .env.production
+    expose:
+      - '3000'
+    # No `ports:` mapping — only Caddy is published on the host; the api
+    # container is reached over the internal compose network as `api:3000`
+    # (see Caddyfile).
+    healthcheck:
+      # Makes an unreachable MongoDB Atlas (e.g. the VPS's IP not yet
+      # allowlisted — the single most likely first-deploy mistake) visible
+      # in `docker compose ps`/`docker ps` instead of a container that looks
+      # "up" but never actually bound port 3000. src/index.ts calls
+      # process.exit(1) if the initial Mongo connection fails, so
+      # `restart: always` will keep retrying too — this healthcheck is the
+      # other half: making that state observable, not just eventually
+      # self-healing. `wget` is already installed in the runtime image (part
+      # of Puppeteer's Debian dependency list) so no extra package is added
+      # just for this.
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3000/health']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    # Chromium (spawned per PDF generation, see src/utils/pdf.utils.ts) is
+    # memory-hungry; without a ceiling, an OOM loop on a small VPS can create
+    # host-wide memory pressure that starves Caddy/other services too. 768m
+    # is a starting point for a small VPS plan (e.g. Hostinger's 2GB/4GB
+    # tiers) — tune per DEPLOYMENT.md section 7 based on actual plan size
+    # and observed usage (`docker stats`).
+    mem_limit: 768m
+    mem_reservation: 256m
+
+  caddy:
+    image: caddy:2-alpine
+    restart: always
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+
+volumes:
+  caddy_data:
+  caddy_config:

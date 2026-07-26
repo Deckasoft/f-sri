@@ -1,190 +1,228 @@
 # 🔒 Guía de Seguridad - F Sri
 
-## 🛡️ Sistema de Registro Seguro
+Este documento describe el modelo de seguridad **actual** de F Sri: una API
+multi-tenant de facturación electrónica con un backoffice de administración.
 
-F Sri implementa un sistema de registro de múltiples capas para proteger contra registros no autorizados.
+> ⚠️ No existe ningún mecanismo de auto-registro público. Las versiones
+> anteriores de este documento describían un sistema de registro público
+> gateado por `MASTER_REGISTRATION_KEY`/`INVITATION_CODES`/`ALLOWED_RUCS`
+> (endpoint `POST /register`) — ese sistema fue **retirado por completo**.
+> Ningún endpoint público permite crear un usuario, una empresa o una API key
+> sin pasar por un administrador.
 
-## 🔐 Estrategias de Seguridad Implementadas
+## 🧭 Dos límites de autenticación independientes
 
-### 1. **Primer Registro (Clave Maestra)**
-- El **primer registro** en el sistema requiere una `MASTER_REGISTRATION_KEY`
-- Esta clave debe configurarse en las variables de entorno antes del despliegue
-- Solo quien tenga acceso al servidor puede realizar el primer registro
+El sistema separa completamente dos audiencias, cada una con su propio
+mecanismo de autenticación:
 
-### 2. **Registros Posteriores (Códigos de Invitación)**
-- Después del primer registro, se requieren **códigos de invitación**
-- Los códigos se configuran en `INVITATION_CODES`
-- Cada código puede usarse múltiples veces (configurable)
+| Superficie | Quién la usa | Autenticación | Middleware |
+| --- | --- | --- | --- |
+| `/api/v1/*` | Sistemas cliente (integración de facturación) | API key por tenant (`X-API-Key` o `Authorization: Bearer sk_live_...`) | `src/middleware/apiKeyAuth.ts` |
+| `/admin/api/*` | Personal interno (backoffice) | JWT de administrador (`Authorization: Bearer ...`), rol `admin` | `src/middleware/adminAuth.ts` |
+| `/onboarding/api/*` | Cliente redimiendo una invitación | Token de invitación de un solo uso (no es una sesión) | público, sin guard |
 
-### 3. **Whitelist de RUCs**
-- Lista de RUCs pre-aprobados en `ALLOWED_RUCS`
-- Solo empresas con RUCs en esta lista pueden registrarse
-- Útil para ambientes controlados
+No hay un JWT único que desbloquee todo el sistema: un JWT de administrador
+nunca sirve para llamar `/api/v1/*`, y una API key de tenant nunca sirve para
+llamar `/admin/api/*`.
 
-### 4. **Deshabilitar Registro**
-- Variable `DISABLE_REGISTRATION=true` bloquea todos los registros
-- Útil después de configurar todas las empresas necesarias
+### API de facturación (`/api/v1/*`) — API key por tenant
 
-## ⚙️ Configuración de Variables de Entorno
+- La clave tiene el formato `sk_live_<32 bytes aleatorios en base64url>`
+  (`src/utils/apiKey.utils.ts`).
+- Solo se persiste su **hash SHA-256** (`ApiKey.key_hash`, campo `unique`); el
+  token en texto plano se muestra exactamente una vez, en el momento de su
+  creación (respuesta de `POST /admin/api/tenants/:id/api-keys` o de
+  `POST /onboarding/api/complete`), y nunca se vuelve a mostrar.
+- Las claves son **revocables** (soft-delete: se marca `revoked_at`, no se
+  borra el documento) y se rechazan si la empresa emisora asociada tiene
+  `active: false` (ver `apiKeyAuth.ts`) — desactivar un tenant corta el acceso
+  de todas sus claves de inmediato, sin tener que revocarlas una por una.
+- Cada request queda acotado al tenant resuelto por la propia API key
+  (`req.auth.companyId`), no por ningún campo del cuerpo de la petición: al
+  emitir un comprobante, el RUC del `infoTributaria` del body debe coincidir
+  con el RUC del tenant autenticado, o la petición se rechaza con 400. Ningún
+  tenant puede leer, listar ni modificar los datos de otro (clientes,
+  productos, comprobantes, certificado).
+
+### API de administración (`/admin/api/*`) — JWT de administrador
+
+- Login: `POST /admin/api/auth/login` con `{ email, password }` (contraseña
+  verificada con bcrypt) devuelve un JWT firmado con `JWT_SECRET`, payload
+  `{ userId, role }`, expiración de **4 días**.
+- `adminAuth` (`src/middleware/adminAuth.ts`) exige que el JWT decodifique
+  correctamente y que `role === 'admin'`; cualquier otro caso es 401/403.
+- El **primer** usuario administrador se crea fuera de la API, con el script
+  `npm run create-admin` (`scripts/create-admin.ts`) — no hay ningún endpoint
+  para auto-registrarse como admin. En producción, dentro del contenedor
+  Docker, se ejecuta la versión precompilada
+  `dist-scripts/scripts/create-admin.js` (ver `DEPLOYMENT.md`).
+- Desde el backoffice, un administrador da de alta tenants
+  (`POST /admin/api/tenants`), genera y revoca sus API keys
+  (`/admin/api/tenants/:id/api-keys`), y genera invitaciones de onboarding
+  (`/admin/api/tenants/:id/invites`).
+
+### Onboarding de un tenant nuevo — invitación de un solo uso
+
+No hay auto-registro: el alta de un tenant siempre la inicia un
+administrador.
+
+1. El administrador crea el tenant (`POST /admin/api/tenants`) y genera una
+   invitación (`POST /admin/api/tenants/:id/invites`).
+2. La invitación es un token aleatorio (`inv_...`, `src/utils/invite.utils.ts`)
+   del que solo se persiste su hash SHA-256 (`Invite.token_hash`); expira a
+   los **7 días** y es de **un solo uso** (consumo atómico vía
+   `findOneAndUpdate` sobre `used_at: null`, para que dos redenciones
+   concurrentes del mismo token no puedan ambas tener éxito).
+3. El cliente abre el enlace de onboarding (`GET /onboarding/api/invite/:token`
+   solo confirma validez y muestra una vista previa con el RUC parcialmente
+   enmascarado) y completa el alta con
+   `POST /onboarding/api/complete`, subiendo su certificado `.p12` en base64
+   y su contraseña.
+4. El certificado se **verifica** (que efectivamente abra con la contraseña
+   dada) **antes** de consumir la invitación — una contraseña incorrecta no
+   quema el único token del tenant.
+5. La respuesta incluye la **primera API key** del tenant, mostrada una única
+   vez.
+
+## 🔐 Certificados digitales (.p12) y otros secretos en reposo
+
+- `IssuingCompany.certificate` y `IssuingCompany.certificate_password` se
+  cifran con AES-256-CBC (`src/utils/encryption.utils.ts`, IV aleatorio por
+  valor) antes de guardarse, usando `ENCRYPTION_KEY` (32 bytes / 64
+  caracteres hexadecimales).
+- Ambos campos tienen `select: false` en el esquema de Mongoose
+  (`src/models/IssuingCompany.ts`): un `find()`/`findOne()` normal —
+  incluyendo el propio `GET /api/v1/issuing-company` de autoservicio del
+  tenant — **nunca** los incluye en la respuesta. Solo el código interno que
+  necesita firmar un comprobante los recupera explícitamente
+  (`.select('+certificate +certificate_password')`).
+- El endpoint de autoservicio `PUT /api/v1/issuing-company/certificate`
+  verifica que el `.p12` recibido efectivamente abra con la contraseña dada
+  (materializándolo a un archivo temporal de corta vida) antes de cifrarlo y
+  guardarlo; si la verificación falla, no se guarda nada.
+- Las claves de API (`ApiKey.key_hash`) y los tokens de invitación
+  (`Invite.token_hash`) se guardan como hash SHA-256, no en texto plano ni
+  cifrados de forma reversible — no hay ninguna operación legítima que
+  necesite recuperar el valor original, solo compararlo.
+
+## 🛡️ Otras medidas
+
+- **Helmet**: cabeceras de seguridad HTTP en todas las respuestas (CSP
+  deshabilitado deliberadamente porque `/docs` sirve Swagger UI desde un CDN
+  externo — ver el comentario en `src/index.ts`).
+- **Rate limiting** (`express-rate-limit`, `src/config/rateLimit.config.ts`):
+  - `tenantLimiter` en todo `/api/v1/*`: 1000 peticiones / 15 min **por
+    tenant** (clave = `req.auth.companyId`, resuelto por `apiKeyAuth`, que
+    corre antes que el limiter — ver `src/index.ts`). Deliberadamente no se
+    acota por IP: detrás del reverse proxy Caddy (`Caddyfile`,
+    `compose.prod.yml`) todo el tráfico llega desde la misma dirección
+    interna, así que una clave por IP metería a todos los tenants de la
+    plataforma en el mismo balde.
+  - `adminLoginLimiter`, por IP, solo en `POST /admin/api/auth/login`: 10
+    peticiones / 15 min.
+  - `onboardingLimiter`, por IP, solo en `/onboarding/api/*`: 20 peticiones /
+    15 min. Es un balde separado de `adminLoginLimiter` a propósito: una
+    ráfaga de tráfico de onboarding de tenants no debe poder bloquear el
+    login de los operadores, ni viceversa.
+  - `app.set('trust proxy', 1)` (`src/index.ts`/`src/testApp.ts`) le dice a
+    Express que confíe en el primer salto (Caddy) para resolver `req.ip` a
+    partir de `X-Forwarded-For` — necesario para que `adminLoginLimiter` y
+    `onboardingLimiter` (ambos por IP) vean la IP real del cliente y no la
+    del proxy. Se usa `1`, no `true`: `true` habilitaría confiar en toda la
+    cadena de `X-Forwarded-For` (spoofeable por el propio cliente) y
+    `express-rate-limit` rechaza arrancar con esa configuración
+    (`ERR_ERL_PERMISSIVE_TRUST_PROXY`).
+- **CORS** (`src/config/cors.config.ts`): configurable vía `ALLOWED_ORIGINS`
+  (lista separada por comas) y `CORS_DISABLED`; nunca deshabilitar CORS en
+  producción. Además de esa lista configurable:
+  - Los orígenes de `localhost`/`127.0.0.1` incluidos por defecto solo se
+    agregan cuando `NODE_ENV !== 'production'` — nunca forman parte de la
+    lista de orígenes permitidos en producción.
+  - `Authorization` y `X-API-Key` (la credencial primaria de tenant, ver
+    "API de facturación" arriba) están en `allowedHeaders`, para que un
+    navegador (no solo curl/Postman) pueda enviarlos.
+  - No hay ninguna regla hardcodeada que permita un dominio de terceros; una
+    versión anterior permitía cualquier `*.vercel.app` cuyo subdominio
+    contuviera una substring concreta (un proyecto de Vercel ajeno,
+    heredado de upstream) — se eliminó por ser una substring, no una
+    coincidencia exacta, y por conceder un origen con credenciales
+    (`credentials: true`) a un tercero no relacionado con este sistema.
+- **Validación de entorno al arrancar (fail-fast)**: `src/config/env.config.ts`
+  detiene el proceso si `JWT_SECRET`, `ENCRYPTION_KEY` (64 hex), `MONGO_URI` o
+  `PUBLIC_URL` faltan o tienen formato inválido, en lugar de arrancar en un
+  estado a medio configurar (p. ej. firmando JWTs con un secreto vacío).
+- **Aislamiento entre tenants**: cubierto en detalle en `README.md` — cada
+  ruta de `/api/v1` está acotada al tenant resuelto por la API key
+  autenticada, nunca por un identificador que llegue en el cuerpo o la URL de
+  la petición.
+
+## ⚙️ Variables de entorno relevantes para seguridad
+
+Ver `.env.example` para el detalle completo, en español, de cada variable.
+Las relevantes a este documento:
 
 ```env
-# Clave maestra para el primer registro (OBLIGATORIA)
-MASTER_REGISTRATION_KEY=tu_clave_super_secreta_aqui
+# Obligatorias (fail-fast al arrancar)
+JWT_SECRET=...              # Firma los JWT de administrador
+ENCRYPTION_KEY=...          # 64 hex chars (32 bytes) — cifra certificado/contraseña de certificado
+MONGO_URI=...
+PUBLIC_URL=...              # Usada para construir los enlaces de onboarding
 
-# Códigos de invitación (opcional)
-INVITATION_CODES=INV2024001,INV2024002,DEMO2024
-
-# RUCs permitidos (opcional)
-ALLOWED_RUCS=1234567890001,0987654321001
-
-# Deshabilitar registro completamente (opcional)
-DISABLE_REGISTRATION=false
+# CORS
+ALLOWED_ORIGINS=https://tu-frontend.com,https://tu-backoffice.com
+CORS_DISABLED=false         # Nunca 'true' en producción
 ```
 
-## 🚀 Flujo de Registro
+## 🚨 Respuestas de error típicas
 
-### Primer Registro
+### API key ausente o inválida (`/api/v1/*`)
+
 ```json
-POST /register
-{
-  "email": "admin@empresa.com",
-  "password": "password123",
-  "masterKey": "tu_clave_super_secreta_aqui",
-  "ruc": "1234567890001",
-  "razon_social": "Mi Empresa S.A.",
-  "nombre_comercial": "Mi Empresa",
-  "certificate": "base64_del_certificado",
-  "certificatePassword": "password_del_certificado"
-}
+{ "message": "API key requerida" }
 ```
 
-### Registros Posteriores
 ```json
-POST /register
-{
-  "email": "usuario@empresa.com",
-  "password": "password123",
-  "invitationCode": "INV2024001",
-  "ruc": "0987654321001",
-  "razon_social": "Otra Empresa S.A.",
-  "nombre_comercial": "Otra Empresa",
-  "certificate": "base64_del_certificado",
-  "certificatePassword": "password_del_certificado"
-}
+{ "message": "API key inválida" }
 ```
 
-## 🔍 Endpoint de Estado
+(Se devuelve el mismo mensaje genérico tanto si la clave no existe como si
+está revocada o pertenece a una empresa desactivada, para no filtrar cuál de
+esas condiciones aplica.)
 
-Consulta el estado del sistema:
+### JWT de administrador ausente o inválido (`/admin/api/*`)
 
-```bash
-GET /status
-```
-
-Respuesta:
 ```json
-{
-  "firstRegistration": false,
-  "registrationDisabled": false,
-  "requiresInvitation": true,
-  "masterKeyRequired": false
-}
+{ "message": "Missing token" }
 ```
 
-## 🛠️ Escenarios de Configuración
-
-### 1. **Empresa Individual (Máxima Seguridad)**
-```env
-MASTER_REGISTRATION_KEY=clave_super_secreta
-DISABLE_REGISTRATION=true  # Después del primer registro
-```
-
-### 2. **Múltiples Empresas Controladas**
-```env
-MASTER_REGISTRATION_KEY=clave_super_secreta
-ALLOWED_RUCS=1234567890001,0987654321001,1122334455001
-```
-
-### 3. **Sistema con Invitaciones**
-```env
-MASTER_REGISTRATION_KEY=clave_super_secreta
-INVITATION_CODES=INV2024001,INV2024002,DEMO2024
-```
-
-### 4. **Ambiente de Desarrollo**
-```env
-MASTER_REGISTRATION_KEY=dev_key_123
-INVITATION_CODES=DEV001,TEST001
-```
-
-## ⚠️ Recomendaciones de Seguridad
-
-### 🔒 **Producción**
-1. **Usa claves fuertes** para `MASTER_REGISTRATION_KEY`
-2. **Cambia las claves** después del primer registro
-3. **Deshabilita el registro** cuando no sea necesario
-4. **Usa HTTPS** siempre en producción
-5. **Configura CORS** correctamente
-
-### 🧪 **Desarrollo**
-1. Usa claves simples pero únicas
-2. Documenta las claves en el equipo
-3. No uses las mismas claves que producción
-
-### 🔄 **Mantenimiento**
-1. **Rota códigos de invitación** periódicamente
-2. **Audita registros** regularmente
-3. **Monitorea intentos** de registro fallidos
-
-## 🚨 Respuestas de Error
-
-### Primer Registro sin Clave Maestra
 ```json
-{
-  "message": "Clave maestra requerida para el primer registro"
-}
+{ "message": "Invalid token" }
 ```
 
-### Código de Invitación Inválido
 ```json
-{
-  "message": "Código de invitación inválido o RUC no autorizado"
-}
+{ "message": "Forbidden" }
 ```
 
-### Registro Deshabilitado
+(este último cuando el JWT es válido pero el `role` no es `admin`)
+
+### Invitación de onboarding inválida, expirada o ya usada
+
 ```json
-{
-  "message": "Registro deshabilitado por el administrador"
-}
+{ "message": "Invalid, expired, or already used invite token" }
 ```
 
-### RUC Duplicado
-```json
-{
-  "message": "Empresa con este RUC ya está registrada"
-}
-```
+## 🐛 Reportar una vulnerabilidad
 
-## 🔧 Troubleshooting
+Si encuentras un problema de seguridad:
 
-### Problema: "Sistema no configurado para registro inicial"
-**Solución**: Configura `MASTER_REGISTRATION_KEY` en las variables de entorno
-
-### Problema: No puedo registrar después del primer usuario
-**Solución**: Configura `INVITATION_CODES` o `ALLOWED_RUCS`
-
-### Problema: Error de formato de RUC
-**Solución**: El RUC debe tener 13 dígitos y terminar en 001
-
-## 📞 Soporte
-
-Si tienes problemas de seguridad:
-1. Revisa los logs del servidor
-2. Verifica las variables de entorno
-3. Consulta este documento
-4. Abre un issue en GitHub
+1. **No** lo reportes en un issue público.
+2. Revisa primero si corresponde a este repositorio (fork privado) o al
+   proyecto original [XaviMontero/f-sri](https://github.com/XaviMontero/f-sri).
+3. Contacta directamente al equipo que mantiene este fork, con el detalle
+   necesario para reproducirlo (endpoint, payload, comportamiento esperado
+   vs. observado).
 
 ---
 
-**⚠️ Importante**: Nunca compartas las claves maestras o códigos de invitación públicamente. 
+**⚠️ Importante**: nunca compartas API keys, tokens de invitación, JWTs de
+administrador ni el valor de `ENCRYPTION_KEY`/`JWT_SECRET` públicamente.

@@ -2,26 +2,57 @@ import { CorsOptions } from 'cors';
 
 // Obtener orígenes permitidos desde variables de entorno
 const getAllowedOrigins = (): string[] => {
-  const defaultOrigins = [
-    // Desarrollo local
-    'http://localhost:3000',
-    'http://localhost:3001',
-    'http://localhost:4200',
-    'http://localhost:8080',
-    'http://127.0.0.1:3000',
-    'http://127.0.0.1:3001',
-    'http://127.0.0.1:4200',
-    'http://127.0.0.1:8080',
-  ];
+  // Orígenes de desarrollo local: solo tiene sentido incluirlos fuera de
+  // producción. getCorsConfig() ya usa corsDevOptions (origin: true) cuando
+  // NODE_ENV === 'development', así que esta lista solo importa hoy en
+  // 'test' u otros entornos no-production — pero se gatea explícitamente en
+  // vez de confiar en esa coincidencia, para que nunca se cuele en la lista
+  // de orígenes permitidos de producción.
+  const defaultOrigins =
+    process.env.NODE_ENV === 'production'
+      ? []
+      : [
+          'http://localhost:3000',
+          'http://localhost:3001',
+          'http://localhost:4200',
+          'http://localhost:8080',
+          'http://127.0.0.1:3000',
+          'http://127.0.0.1:3001',
+          'http://127.0.0.1:4200',
+          'http://127.0.0.1:8080',
+        ];
+
+  // El propio origen de la app, derivado de PUBLIC_URL. SIEMPRE permitido, en
+  // cualquier entorno: la SPA de backoffice (/admin) y la de onboarding se
+  // sirven desde este mismo origen (src/staticSpa.ts), así que una petición
+  // que llega con este Origin es same-origin por construcción, no una
+  // petición cross-origin — permitirla no amplía la superficie.
+  //
+  // Es obligatorio, no una comodidad: Vite marca los tags que genera con el
+  // atributo `crossorigin` (<script type="module" crossorigin>, <link
+  // rel="stylesheet" crossorigin>), y ese atributo hace que el navegador
+  // mande cabecera Origin INCLUSO en peticiones same-origin. Sin esta
+  // entrada, el navegador recibe 403 al pedir /admin/assets/*.css y *.js y
+  // el backoffice queda en pantalla en blanco. Los métodos no-simples
+  // (POST/PUT/DELETE contra /admin/api/*) también mandan Origin, así que
+  // afecta a toda la SPA, no solo a sus assets.
+  const publicUrl = process.env.PUBLIC_URL;
+  const ownOrigins: string[] = [];
+  if (publicUrl) {
+    try {
+      ownOrigins.push(new URL(publicUrl).origin);
+    } catch {
+      // loadEnv() ya valida que PUBLIC_URL sea una URL válida y aborta el
+      // arranque si no lo es; este catch solo evita romper en contextos que
+      // importan este módulo sin haber pasado por loadEnv() (p. ej. tests).
+    }
+  }
 
   // Agregar orígenes desde variable de entorno si existe
   const envOrigins = process.env.ALLOWED_ORIGINS;
-  if (envOrigins) {
-    const additionalOrigins = envOrigins.split(',').map((origin) => origin.trim());
-    return [...defaultOrigins, ...additionalOrigins];
-  }
+  const additionalOrigins = envOrigins ? envOrigins.split(',').map((origin) => origin.trim()) : [];
 
-  return defaultOrigins;
+  return [...new Set([...defaultOrigins, ...ownOrigins, ...additionalOrigins])];
 };
 
 const allowedOrigins = getAllowedOrigins();
@@ -48,12 +79,6 @@ export const corsOptions: CorsOptions = {
       return callback(null, true);
     }
 
-    // Permitir todos los dominios de Vercel de el300profe-7588s-projects (mejorada la lógica)
-    if (origin.endsWith('.vercel.app') && origin.includes('el300profe-7588s-projects')) {
-      console.log(`✅ Vercel domain allowed: ${origin}`);
-      return callback(null, true);
-    }
-
     // Logging para debug
     console.log(`🚫 CORS blocked origin: ${origin}`);
     console.log(`📋 Allowed origins:`, allowedOrigins);
@@ -69,23 +94,28 @@ export const corsOptions: CorsOptions = {
   // Métodos HTTP permitidos
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD'],
 
-  // Headers permitidos en las peticiones
+  // Headers permitidos en las peticiones. X-API-Key es la credencial
+  // primaria de tenant (src/middleware/apiKeyAuth.ts, documentada como
+  // default en src/swagger.ts y CORS_SETUP.md) — sin ella en esta lista, un
+  // navegador haciendo fetch(url, { headers: { 'X-API-Key': ... } }) desde un
+  // origen permitido falla en el preflight (funciona en curl, falla en
+  // browser). x-access-token/x-auth-token se quitan: ningún middleware los
+  // lee.
   allowedHeaders: [
     'Origin',
     'X-Requested-With',
     'Content-Type',
     'Accept',
     'Authorization',
+    'X-API-Key',
     'Cache-Control',
     'Pragma',
-    'x-access-token',
-    'x-auth-token',
     'Access-Control-Allow-Headers',
     'Access-Control-Allow-Origin',
   ],
 
   // Headers que el cliente puede acceder
-  exposedHeaders: ['set-cookie', 'Authorization', 'x-access-token', 'x-auth-token'],
+  exposedHeaders: ['set-cookie', 'Authorization'],
 
   // Tiempo de cache para preflight requests (24 horas)
   maxAge: 86400,

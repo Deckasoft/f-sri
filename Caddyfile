@@ -1,0 +1,16 @@
+yourdomain.com {
+	# Straight reverse proxy — the API container serves the admin/onboarding
+	# SPA itself (src/staticSpa.ts, mounted at /admin and /onboarding with its
+	# own API-precedence guard). Caddy must NOT also try to serve static files
+	# or split routing by path here: that would duplicate/conflict with
+	# Express's mounting. One proxy directive for everything.
+	reverse_proxy api:3000
+
+	# Caddy handles automatic HTTPS (Let's Encrypt) for `yourdomain.com`
+	# automatically as long as:
+	#   - this file's site address is the real domain (replace it below),
+	#   - that domain's DNS A/AAAA record points at the VPS, and
+	#   - ports 80 and 443 are published and reachable from the internet
+	#     (see compose.prod.yml).
+	encode gzip
+}

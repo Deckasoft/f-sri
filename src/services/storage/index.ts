@@ -16,4 +16,5 @@
 export { IPDFStorageProvider, PDFStorageResponse } from '../../interfaces/pdf-storage.interface';
 export { CloudinaryPDFStorage } from './cloudinary.storage';
 export { LocalPDFStorage } from './local.storage';
+export { S3PDFStorage } from './s3.storage';
 export { PDFStorageFactory, StorageProviderType } from './storage.factory';

@@ -1,5 +1,3 @@
-import fs from 'fs';
-
 // --- Mocks for collaborators ---
 const firmarXMLMock = jest.fn().mockResolvedValue('<notaCredito>firmada</notaCredito>');
 jest.mock('../../src/utils/firma.utils', () => ({
@@ -31,14 +29,26 @@ jest.mock('../../src/services/storage', () => ({
 const invoiceServiceMocks = {
   buscarTipoIdentificacion: jest.fn(),
   buscarIssuingCompany: jest.fn(),
+  resolveEmpresaAutenticada: jest.fn(),
   buscarClient: jest.fn(),
   buscarProduct: jest.fn(),
-  diagnoseP12Certificate: jest.fn(),
-  verifyP12Password: jest.fn(),
-  findWorkingP12Password: jest.fn(),
 };
 jest.mock('../../src/services/invoice.service', () => ({
   InvoiceService: invoiceServiceMocks,
+}));
+
+// withCompanyP12's real temp-file lifecycle is covered by
+// certificate.utils.test.ts; here we just need to simulate its contract.
+const withCompanyP12Mock = jest.fn(async (company: any, fn: (p: string, pw: string) => Promise<any>) => {
+  if (!company.certificate || !company.certificate_password) {
+    throw new Error('La empresa no tiene certificado digital configurado');
+  }
+  return fn('/tmp/cert.p12', 'test-cert-password');
+});
+const verifyP12PasswordMock = jest.fn().mockResolvedValue({ valid: true });
+jest.mock('../../src/utils/certificate.utils', () => ({
+  withCompanyP12: (...args: any[]) => (withCompanyP12Mock as any)(...args),
+  verifyP12Password: (...args: any[]) => (verifyP12PasswordMock as any)(...args),
 }));
 
 // --- Model mocks ---
@@ -94,10 +104,13 @@ jest.mock('../../src/models/Invoice', () => ({
   default: { findOne: (...args: any[]) => invoiceStatics.findOne(...args) },
 }));
 
-const issuingCompanyStatics = { findOne: jest.fn() };
-jest.mock('../../src/models/IssuingCompany', () => ({
+// Sequence backs getNextSecuencial (src/utils/sequence.utils.ts): a single
+// atomic findOneAndUpdate($inc, upsert) instead of the old
+// read-highest-then-increment approach that used to query CreditNote/IssuingCompany.
+const sequenceStatics = { findOneAndUpdate: jest.fn() };
+jest.mock('../../src/models/Sequence', () => ({
   __esModule: true,
-  default: { findOne: (...args: any[]) => issuingCompanyStatics.findOne(...args) },
+  default: { findOneAndUpdate: (...args: any[]) => sequenceStatics.findOneAndUpdate(...args) },
 }));
 
 import { CreditNoteService } from '../../src/services/credit-note.service';
@@ -115,8 +128,8 @@ const empresaMock: any = {
   direccion_matriz: 'Av. Principal',
   direccion_establecimiento: 'Av. Principal',
   obligado_contabilidad: true,
-  certificatePath: '/tmp/cert.p12',
-  certificatePassword: 'test-cert-password',
+  certificate: 'encrypted-cert-base64',
+  certificate_password: 'encrypted-cert-password',
 };
 
 const clienteMock: any = { _id: 'cliente-1', razon_social: 'CLIENTE', identificacion: '0106079783' };
@@ -153,13 +166,19 @@ const requestValido: CreditNoteRequest = {
   ],
 };
 
+const COMPANY_ID = empresaMock._id;
+
 function prepararLookupsFelices() {
   invoiceServiceMocks.buscarTipoIdentificacion.mockResolvedValue({ codigo: '05' });
   invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(empresaMock);
+  invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue(empresaMock);
   invoiceServiceMocks.buscarClient.mockResolvedValue(clienteMock);
   invoiceServiceMocks.buscarProduct.mockResolvedValue(productoMock);
-  issuingCompanyStatics.findOne.mockResolvedValue(empresaMock);
-  creditNoteStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue(null) });
+  let currentSecuencial = 0;
+  sequenceStatics.findOneAndUpdate.mockImplementation(async () => {
+    currentSecuencial += 1;
+    return { current: currentSecuencial };
+  });
 }
 
 describe('CreditNoteService', () => {
@@ -189,20 +208,15 @@ describe('CreditNoteService', () => {
   });
 
   describe('generarSecuencial', () => {
-    it('starts at 000000001 when there are no credit notes', async () => {
-      await expect(CreditNoteService.generarSecuencial(empresaMock.ruc)).resolves.toBe('000000001');
-    });
+    it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
+      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
+      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
 
-    it('increments the latest secuencial', async () => {
-      creditNoteStatics.findOne.mockReturnValue({ sort: jest.fn().mockResolvedValue({ secuencial: '000000041' }) });
-
-      await expect(CreditNoteService.generarSecuencial(empresaMock.ruc)).resolves.toBe('000000042');
-    });
-
-    it('throws when the empresa does not exist', async () => {
-      issuingCompanyStatics.findOne.mockResolvedValue(null);
-
-      await expect(CreditNoteService.generarSecuencial('999')).rejects.toThrow('not found');
+      expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
+        { empresa_emisora_id: COMPANY_ID, document_type: '04' },
+        { $inc: { current: 1 } },
+        { upsert: true, new: true },
+      );
     });
   });
 
@@ -215,15 +229,24 @@ describe('CreditNoteService', () => {
       ],
       [
         'empresa',
-        () => invoiceServiceMocks.buscarIssuingCompany.mockResolvedValue(null),
+        () =>
+          invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(new Error('Empresa emisora no encontrada')),
         'Empresa emisora no encontrada',
+      ],
+      [
+        'RUC mismatch',
+        () =>
+          invoiceServiceMocks.resolveEmpresaAutenticada.mockRejectedValue(
+            new Error('El RUC del comprobante no coincide con la empresa autenticada'),
+          ),
+        'El RUC del comprobante no coincide con la empresa autenticada',
       ],
       ['client', () => invoiceServiceMocks.buscarClient.mockResolvedValue(null), 'Client not found'],
       ['product', () => invoiceServiceMocks.buscarProduct.mockResolvedValue(null), 'Product not found'],
     ])('fails when the %s is missing', async (_name, arrange, mensaje) => {
       arrange();
 
-      await expect(CreditNoteService.procesarNotaCreditoCompleta(requestValido)).rejects.toThrow(mensaje);
+      await expect(CreditNoteService.procesarNotaCreditoCompleta(requestValido, COMPANY_ID)).rejects.toThrow(mensaje);
     });
 
     it('fails on invalid dates', async () => {
@@ -232,13 +255,15 @@ describe('CreditNoteService', () => {
         infoNotaCredito: { ...requestValido.infoNotaCredito, fechaEmision: 'fecha-mala' },
       };
 
-      await expect(CreditNoteService.procesarNotaCreditoCompleta(invalido)).rejects.toThrow('Invalid date format');
+      await expect(CreditNoteService.procesarNotaCreditoCompleta(invalido, COMPANY_ID)).rejects.toThrow(
+        'Invalid date format',
+      );
     });
 
     it('resolves every entity and links the modified invoice when it exists', async () => {
       invoiceStatics.findOne.mockResolvedValue({ _id: 'factura-99' });
 
-      const resultado = await CreditNoteService.procesarNotaCreditoCompleta(requestValido);
+      const resultado = await CreditNoteService.procesarNotaCreditoCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.empresa).toBe(empresaMock);
       expect(resultado.cliente).toBe(clienteMock);
@@ -250,11 +275,13 @@ describe('CreditNoteService', () => {
 
   describe('crearNotaCreditoCompleta', () => {
     beforeEach(() => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false); // skip real SRI flow in background
+      // Skip the real signing flow in the fire-and-forget background call by
+      // resolving an empresa without a certificate configured.
+      invoiceServiceMocks.resolveEmpresaAutenticada.mockResolvedValue({ ...empresaMock, certificate: undefined });
     });
 
     it('creates the credit note with an 04 access key, XML and details', async () => {
-      const resultado = await CreditNoteService.crearNotaCreditoCompleta(requestValido);
+      const resultado = await CreditNoteService.crearNotaCreditoCompleta(requestValido, COMPANY_ID);
 
       expect(resultado.nota_credito.clave_acceso).toHaveLength(49);
       expect(resultado.nota_credito.clave_acceso.substring(8, 10)).toBe('04');
@@ -277,12 +304,11 @@ describe('CreditNoteService', () => {
     });
 
     it('marks ERROR_FIRMA when there is no certificate', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(false);
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(
         doc,
-        { ...empresaMock, certificatePath: undefined },
+        { ...empresaMock, certificate: undefined },
         clienteMock,
         [],
         requestValido,
@@ -293,21 +319,14 @@ describe('CreditNoteService', () => {
     });
 
     it('signs with tipoDocumento 04, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const programarSpy = jest.spyOn(CreditNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [productoMock], requestValido);
 
-      expect(firmarXMLMock).toHaveBeenCalledWith(
-        '<notaCredito/>',
-        empresaMock.certificatePath,
-        'test-cert-password',
-        '04',
-      );
+      expect(firmarXMLMock).toHaveBeenCalledWith('<notaCredito/>', '/tmp/cert.p12', 'test-cert-password', '04');
       expect(doc.xml_firmado).toBe('<notaCredito>firmada</notaCredito>');
       expect(doc.sri_estado).toBe('RECIBIDA');
       expect(generateCreditNotePDFMock).toHaveBeenCalled();
@@ -316,9 +335,7 @@ describe('CreditNoteService', () => {
     });
 
     it('records the DEVUELTA state without generating a PDF', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: true });
+      verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({
         estado: 'DEVUELTA',
         mensajes: { mensaje: { identificador: '35' } },
@@ -332,31 +349,15 @@ describe('CreditNoteService', () => {
       expect(generateCreditNotePDFMock).not.toHaveBeenCalled();
     });
 
-    it('falls back to an alternative password when verification fails', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: false, error: 'bad mac' });
-      invoiceServiceMocks.findWorkingP12Password.mockResolvedValue({ password: 'test-fallback-password' });
-      enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      jest.spyOn(CreditNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
-      const doc = notaCreditoDoc();
-
-      await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [], requestValido);
-
-      expect(firmarXMLMock).toHaveBeenCalledWith(expect.anything(), expect.anything(), 'test-fallback-password', '04');
-    });
-
-    it('marks ERROR_FIRMA when no password works', async () => {
-      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
-      invoiceServiceMocks.diagnoseP12Certificate.mockResolvedValue({ isValidP12: true });
-      invoiceServiceMocks.verifyP12Password.mockResolvedValue({ valid: false, error: 'bad mac' });
-      invoiceServiceMocks.findWorkingP12Password.mockResolvedValue({ password: null });
+    it('marks ERROR_FIRMA when the password is wrong (no brute-force fallback)', async () => {
+      verifyP12PasswordMock.mockResolvedValue({ valid: false, error: 'bad mac' });
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [], requestValido);
 
       expect(doc.sri_estado).toBe('ERROR_FIRMA');
       expect(doc.sri_mensajes.error).toContain('contraseña');
+      expect(firmarXMLMock).not.toHaveBeenCalled();
     });
   });
 

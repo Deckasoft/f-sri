@@ -1,0 +1,32 @@
+# Dependencies (installed fresh inside the build, via package-lock.json)
+node_modules/
+admin/node_modules/
+
+# Build output (rebuilt inside the image; dist/ and admin/dist/ are gitignored)
+dist/
+admin/dist/
+
+# Test / coverage artifacts — not needed in the image
+coverage/
+__tests__/
+jest.config.js
+
+# Secrets — must NEVER be baked into the image
+.env
+.env.*
+!.env.example
+
+# VCS / editor / misc
+.git/
+.github/
+.vscode/
+.superpowers/
+*.log
+.DS_Store
+
+# Dev-only compose (compose.prod.yml is the one used to build/run the image)
+compose.yml
+
+# Docs not needed at runtime
+*.md
+LICENSE

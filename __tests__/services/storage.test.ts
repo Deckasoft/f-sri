@@ -96,6 +96,28 @@ describe('LocalPDFStorage', () => {
     });
   });
 
+  describe('getDownloadUrl', () => {
+    it('resolves to the public URL — nothing to presign for local storage', async () => {
+      const url = await storage.getDownloadUrl('test_invoice');
+
+      expect(url).toBe(storage.getPublicUrl('test_invoice'));
+    });
+  });
+
+  describe('getFileBuffer', () => {
+    it('reads the bytes of a stored PDF', async () => {
+      const uploadResult = await storage.upload(testBuffer, testFilename);
+
+      const buffer = await storage.getFileBuffer(uploadResult.publicId);
+
+      expect(buffer.equals(testBuffer)).toBe(true);
+    });
+
+    it('throws a descriptive error when the file cannot be read', async () => {
+      await expect(storage.getFileBuffer('does_not_exist')).rejects.toThrow('Error leyendo PDF local');
+    });
+  });
+
   describe('getProviderName', () => {
     it('should return local as provider name', () => {
       expect(storage.getProviderName()).toBe('local');
@@ -279,6 +301,44 @@ describe('CloudinaryPDFStorage', () => {
     });
   });
 
+  describe('getDownloadUrl', () => {
+    it('resolves to the public URL — nothing to presign for cloudinary', async () => {
+      const storage = new CloudinaryPDFStorage();
+
+      const url = await storage.getDownloadUrl('facturas/test_invoice');
+
+      expect(url).toBe(storage.getPublicUrl('facturas/test_invoice'));
+    });
+  });
+
+  describe('getFileBuffer', () => {
+    it('fetches the PDF bytes from the public URL', async () => {
+      // Buffer.from(str).buffer is NOT safe here: small buffers are carved
+      // out of Node's shared internal pool, so `.buffer` would return the
+      // whole pool (garbage from unrelated allocations) rather than just
+      // these bytes. TextEncoder gives a standalone, correctly-sized
+      // ArrayBuffer instead.
+      const bytes = new TextEncoder().encode('cloud-pdf-bytes');
+      jest.spyOn(global, 'fetch').mockResolvedValue({
+        ok: true,
+        arrayBuffer: async () => bytes.buffer,
+      } as Response);
+
+      const storage = new CloudinaryPDFStorage();
+      const buffer = await storage.getFileBuffer('facturas/test_invoice');
+
+      expect(Buffer.from(buffer).toString()).toBe('cloud-pdf-bytes');
+    });
+
+    it('throws a descriptive error when the fetch response is not ok', async () => {
+      jest.spyOn(global, 'fetch').mockResolvedValue({ ok: false, status: 404 } as Response);
+
+      const storage = new CloudinaryPDFStorage();
+
+      await expect(storage.getFileBuffer('facturas/missing')).rejects.toThrow('Error descargando PDF de Cloudinary');
+    });
+  });
+
   describe('getProviderName', () => {
     it('should return cloudinary as provider name', () => {
       const storage = new CloudinaryPDFStorage();
@@ -358,10 +418,24 @@ describe('PDFStorageFactory', () => {
       expect(storage1).not.toBe(storage2);
     });
 
-    it('should fallback to local for s3 (not implemented)', () => {
+    it('should create a real S3 provider when AWS credentials are configured', () => {
+      process.env.AWS_ACCESS_KEY_ID = 'test-access-key';
+      process.env.AWS_SECRET_ACCESS_KEY = 'test-secret-key';
+      process.env.AWS_REGION = 'us-east-1';
+      process.env.S3_BUCKET = 'test-bucket';
+
       const storage = PDFStorageFactory.create('s3');
 
-      expect(storage.getProviderName()).toBe('local');
+      expect(storage.getProviderName()).toBe('s3');
+    });
+
+    it('should throw (not silently fall back) when S3 is requested without AWS credentials', () => {
+      delete process.env.AWS_ACCESS_KEY_ID;
+      delete process.env.AWS_SECRET_ACCESS_KEY;
+      delete process.env.AWS_REGION;
+      delete process.env.S3_BUCKET;
+
+      expect(() => PDFStorageFactory.create('s3')).toThrow('Configuración de S3 inválida');
     });
 
     it('should fallback to local for azure (not implemented)', () => {
@@ -404,8 +478,8 @@ describe('PDFStorageFactory', () => {
       expect(PDFStorageFactory.isProviderSupported('local')).toBe(true);
     });
 
-    it('should return false for s3', () => {
-      expect(PDFStorageFactory.isProviderSupported('s3')).toBe(false);
+    it('should return true for s3', () => {
+      expect(PDFStorageFactory.isProviderSupported('s3')).toBe(true);
     });
 
     it('should return false for unknown provider', () => {
@@ -423,7 +497,7 @@ describe('PDFStorageFactory', () => {
       expect(providers[1].type).toBe('local');
       expect(providers[1].implemented).toBe(true);
       expect(providers[2].type).toBe('s3');
-      expect(providers[2].implemented).toBe(false);
+      expect(providers[2].implemented).toBe(true);
       expect(providers[3].type).toBe('azure');
       expect(providers[3].implemented).toBe(false);
     });

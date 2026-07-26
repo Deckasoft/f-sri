@@ -1,6 +1,7 @@
 import { IPDFStorageProvider } from '../../interfaces/pdf-storage.interface';
 import { CloudinaryPDFStorage } from './cloudinary.storage';
 import { LocalPDFStorage } from './local.storage';
+import { S3PDFStorage } from './s3.storage';
 
 /**
  * Tipos de proveedores de almacenamiento soportados
@@ -64,10 +65,8 @@ export class PDFStorageFactory {
         break;
 
       case 's3':
-        console.log('⚠️  S3 no está implementado aún, usando almacenamiento local');
-        // TODO: Implementar S3PDFStorage cuando sea necesario
-        // provider = new S3PDFStorage();
-        provider = new LocalPDFStorage();
+        console.log('☁️  Usando proveedor de almacenamiento: S3');
+        provider = new S3PDFStorage();
         break;
 
       case 'azure':
@@ -99,9 +98,9 @@ export class PDFStorageFactory {
    * Verifica si un tipo de proveedor está soportado
    */
   static isProviderSupported(providerType: string): boolean {
-    const supportedProviders: StorageProviderType[] = ['cloudinary', 'local'];
-    // 's3' y 'azure' están en el tipo pero no completamente implementados
-    return supportedProviders.includes(providerType as StorageProviderType);
+    const supportedProviders: readonly StorageProviderType[] = ['cloudinary', 'local', 's3'];
+    // 'azure' está en el tipo pero no implementado
+    return supportedProviders.some((supported) => supported === providerType);
   }
 
   /**
@@ -121,8 +120,8 @@ export class PDFStorageFactory {
       },
       {
         type: 's3',
-        implemented: false,
-        description: 'Amazon S3 (no implementado)',
+        implemented: true,
+        description: 'Amazon S3 (bucket privado, URLs de descarga presignadas)',
       },
       {
         type: 'azure',

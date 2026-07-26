@@ -133,10 +133,3 @@ export async function firmarXML(
     throw new Error(`Error al firmar XML: ${error.message}`);
   }
 }
-
-/**
- * Guarda un XML firmado en el sistema de archivos
- */
-export function guardarXMLFirmado(xmlString: string, outputPath: string): void {
-  fs.writeFileSync(outputPath, xmlString, { encoding: 'utf8' });
-}

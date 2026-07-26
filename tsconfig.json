@@ -5,7 +5,28 @@
     "outDir": "dist",
     "strict": true,
     "esModuleInterop": true,
+    // La declaración de tipos de `resend` referencia react (React.ReactElement)
+    // como soporte opcional para plantillas JSX, aun cuando no se instale react
+    // como dependencia. No usamos ese modo (enviamos html/text planos), así que
+    // sin skipLibCheck tsc falla al resolver ese tipo dentro de node_modules.
+    "skipLibCheck": true,
     "types": ["jest", "node"]
   },
-  "exclude": ["node_modules", "dist"]
+  // ts-node (usado por `npm run dev` vía nodemon, y por scripts/create-admin.ts)
+  // compila archivo por archivo siguiendo los imports, así que por defecto NUNCA
+  // carga src/types/express.d.ts: es una declaración ambiental (declaration
+  // merging sobre Express.Request para añadir `req.auth`) que ningún módulo
+  // importa — sólo entra al programa por el `include` de este tsconfig. Sin
+  // `files: true`, `npm run dev` falla con TS2339 "Property 'auth' does not
+  // exist on type 'Request'" aunque `tsc --noEmit`, el build de Docker y los
+  // tests pasen, porque todos ésos sí hacen una compilación de proyecto completa.
+  "ts-node": {
+    "files": true
+  },
+  // admin/ is a separate npm package (its own Vite + React + TS project,
+  // config, and tsconfig) — see admin/README-less setup in admin/tsconfig*.json.
+  // It must stay out of the backend's typecheck: JSX/DOM types aren't part
+  // of this project's `types` (["jest", "node"]), and admin/ has no
+  // dependency on this tsconfig at all.
+  "exclude": ["node_modules", "dist", "admin"]
 }

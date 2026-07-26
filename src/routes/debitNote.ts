@@ -2,12 +2,14 @@ import { Router } from 'express';
 import DebitNote from '../models/DebitNote';
 import DebitNotePDF from '../models/DebitNotePDF';
 import { DebitNoteService } from '../services/debit-note.service';
+import { getTenantCompanyId } from '../utils/tenant.utils';
 
 const router = Router();
 
 router.post('/', async (req, res) => {
   try {
-    const doc = new DebitNote(req.body);
+    const companyId = getTenantCompanyId(req);
+    const doc = new DebitNote({ ...req.body, empresa_emisora_id: companyId });
     await doc.save();
     res.status(201).json(doc);
   } catch (err) {
@@ -24,7 +26,8 @@ router.post('/complete', async (req, res) => {
       });
     }
 
-    const resultado = await DebitNoteService.crearNotaDebitoCompleta(req.body.nota_debito);
+    const companyId = getTenantCompanyId(req);
+    const resultado = await DebitNoteService.crearNotaDebitoCompleta(req.body.nota_debito, companyId);
 
     return res.status(201).json({
       success: true,
@@ -39,6 +42,7 @@ router.post('/complete', async (req, res) => {
       'Empresa emisora no encontrada',
       'Invalid date format',
       'Datos de nota de débito inválidos o incompletos',
+      'El RUC del comprobante no coincide con la empresa autenticada',
     ];
 
     const isValidationError = validationErrors.some((error) => err.message.includes(error));
@@ -58,9 +62,10 @@ router.post('/complete', async (req, res) => {
   }
 });
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const docs = await DebitNote.find();
+    const companyId = getTenantCompanyId(req);
+    const docs = await DebitNote.find({ empresa_emisora_id: companyId });
     res.json(docs);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -69,7 +74,8 @@ router.get('/', async (_req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await DebitNote.findById(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await DebitNote.findOne({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -79,6 +85,10 @@ router.get('/:id', async (req, res) => {
 
 router.get('/:id/pdf', async (req, res) => {
   try {
+    const companyId = getTenantCompanyId(req);
+    const parent = await DebitNote.findOne({ _id: req.params.id, empresa_emisora_id: companyId });
+    if (!parent) return res.status(404).json({ message: 'Not found' });
+
     const doc = await DebitNotePDF.findOne({ nota_debito_id: req.params.id });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
@@ -89,7 +99,11 @@ router.get('/:id/pdf', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const doc = await DebitNote.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const companyId = getTenantCompanyId(req);
+    const { empresa_emisora_id: _ignoredCompanyId, ...updateData } = req.body;
+    const doc = await DebitNote.findOneAndUpdate({ _id: req.params.id, empresa_emisora_id: companyId }, updateData, {
+      new: true,
+    });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -99,7 +113,8 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const doc = await DebitNote.findByIdAndDelete(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await DebitNote.findOneAndDelete({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json({ message: 'Deleted' });
   } catch (err) {

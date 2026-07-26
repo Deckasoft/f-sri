@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import { clearAllScheduledAuthorizationChecks } from '../src/utils/scheduledCheck.utils';
+import { flushAllBackgroundWork } from '../src/utils/backgroundWork.utils';
 
 // Global test setup
 jest.setTimeout(30000);
@@ -9,6 +11,7 @@ process.env.JWT_SECRET = 'test_jwt_secret_key_for_testing';
 // Generado en tiempo de ejecución (no hardcodeado) para evitar falsos positivos de escaneo de secretos
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
 process.env.MONGO_URI = 'mongodb://localhost:27017/veronica_test';
+process.env.PUBLIC_URL = 'http://localhost:3000';
 
 // Global mocks for CI environment
 if (process.env.CI) {
@@ -54,7 +57,25 @@ afterAll(() => {
 });
 
 // Global test cleanup
-afterEach(() => {
+afterEach(async () => {
+  // Wait for any fire-and-forget async work a test's request may have
+  // kicked off — procesarEnvioSRI's own chain (all 5 document services) and
+  // apiKeyAuth's touchLastUsed — to settle, before resetting mocks below.
+  // See src/utils/backgroundWork.utils.ts: none of this is awaited by its
+  // real caller (by design), so without this a test can end while that work
+  // is still running, which then keeps calling mocks that the NEXT,
+  // unrelated test's beforeEach has already reconfigured — corrupting that
+  // test's call counts/arguments instead of its own.
+  await flushAllBackgroundWork();
+
+  // Cancel any real setTimeout a test's exercise of
+  // programarConsultaAutorizacion (invoice/credit-note/debit-note/
+  // delivery-note/withholding services) may have left pending — see
+  // src/utils/scheduledCheck.utils.ts. Otherwise a real ~5s timer a test
+  // forgot to mock away can fire during a LATER, unrelated test still
+  // running in the same Jest worker, intermittently flaking the suite.
+  clearAllScheduledAuthorizationChecks();
+
   // Clear all mocks after each test
   jest.clearAllMocks();
 });

@@ -1,11 +1,13 @@
 import { Router } from 'express';
 import Client from '../models/Client';
+import { getTenantCompanyId } from '../utils/tenant.utils';
 
 const router = Router();
 
 router.post('/', async (req, res) => {
   try {
-    const doc = new Client(req.body);
+    const companyId = getTenantCompanyId(req);
+    const doc = new Client({ ...req.body, empresa_emisora_id: companyId });
     await doc.save();
     res.status(201).json(doc);
   } catch (err) {
@@ -13,9 +15,10 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.get('/', async (_req, res) => {
+router.get('/', async (req, res) => {
   try {
-    const docs = await Client.find();
+    const companyId = getTenantCompanyId(req);
+    const docs = await Client.find({ empresa_emisora_id: companyId });
     res.json(docs);
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -24,7 +27,8 @@ router.get('/', async (_req, res) => {
 
 router.get('/:id', async (req, res) => {
   try {
-    const doc = await Client.findById(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await Client.findOne({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -34,7 +38,13 @@ router.get('/:id', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const doc = await Client.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    const companyId = getTenantCompanyId(req);
+    // empresa_emisora_id is never client-settable: a tenant must not be able
+    // to hand its own record off to another tenant via the update body.
+    const { empresa_emisora_id: _ignoredCompanyId, ...updateData } = req.body;
+    const doc = await Client.findOneAndUpdate({ _id: req.params.id, empresa_emisora_id: companyId }, updateData, {
+      new: true,
+    });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json(doc);
   } catch (err) {
@@ -44,7 +54,8 @@ router.put('/:id', async (req, res) => {
 
 router.delete('/:id', async (req, res) => {
   try {
-    const doc = await Client.findByIdAndDelete(req.params.id);
+    const companyId = getTenantCompanyId(req);
+    const doc = await Client.findOneAndDelete({ _id: req.params.id, empresa_emisora_id: companyId });
     if (!doc) return res.status(404).json({ message: 'Not found' });
     res.json({ message: 'Deleted' });
   } catch (err) {

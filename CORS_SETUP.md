@@ -1,139 +1,98 @@
 # 🌐 Configuración de CORS
 
-Este documento explica cómo se solucionó el problema de CORS en la aplicación.
+Este documento explica cómo está configurado CORS en la aplicación y cómo
+habilitar un frontend/backoffice adicional.
 
-## 🚨 **Problema Original**
+> Nota: este documento describía originalmente la resolución de un problema
+> de CORS puntual contra un despliegue en Heroku de un frontend específico.
+> El despliegue actual de F Sri es Docker + VPS (ver `DEPLOYMENT.md`), y los
+> antiguos endpoints `/auth`/`/register` ya no existen — este documento se
+> generalizó para reflejar la configuración de CORS actual, independiente de
+> dónde se despliegue el frontend consumidor.
 
-Error en `https://app-eva-gym-canar-7c91975e103e.herokuapp.com/auth`:
-```
-CORS policy: Origin 'https://your-frontend-domain.com' has been blocked
-```
+## ✅ **Configuración Implementada**
 
-## ✅ **Solución Implementada**
+`src/config/cors.config.ts` implementa una configuración de CORS que permite:
 
-### 1. **Instalación de CORS**
-```bash
-npm install cors @types/cors
-```
+- ✅ **Desarrollo**: Cualquier `localhost` o `127.0.0.1` (solo cuando
+  `NODE_ENV !== 'production'` — estos orígenes nunca se agregan a la lista
+  permitida en producción)
+- ✅ **Peticiones sin origen**: Postman, aplicaciones móviles, cURL
+- ✅ **Dominios personalizados**: Vía la variable de entorno `ALLOWED_ORIGINS`
 
-### 2. **Configuración Inteligente**
+No hay ninguna regla adicional hardcodeada que permita un dominio de
+terceros no listado en `ALLOWED_ORIGINS` — si tu frontend/backoffice no está
+ahí (o no es `localhost` en desarrollo), agrégalo explícitamente.
 
-Se implementó una configuración de CORS que permite:
-
-- ✅ **Desarrollo**: Cualquier `localhost` o `127.0.0.1`
-- ✅ **Heroku Backend**: Tu dominio actual de Heroku
-- ✅ **Peticiones sin origen**: Postman, aplicaciones móviles
-- ✅ **Dominios personalizados**: Via variable de entorno
-
-### 3. **Variables de Entorno**
-
-Agrega estas variables a tu `.env` en Heroku:
+### Variables de Entorno
 
 ```bash
-# Para permitir dominios específicos (separados por coma)
-ALLOWED_ORIGINS=https://tu-frontend.com,https://tu-app.vercel.app
+# Orígenes permitidos, separados por coma
+ALLOWED_ORIGINS=https://tu-frontend.com,https://tu-backoffice.com
 
-# Para desarrollo/testing (deshabilita CORS completamente)
-CORS_DISABLED=true
+# Deshabilita CORS completamente (NO recomendado en producción)
+CORS_DISABLED=false
 
-# Entorno de producción
 NODE_ENV=production
 ```
 
-### 4. **Configuración en Heroku**
-
-En el dashboard de Heroku, ve a **Settings > Config Vars** y agrega:
-
-| Key | Value |
-|-----|-------|
-| `ALLOWED_ORIGINS` | `https://tu-frontend-domain.com,https://otra-domain.com` |
-| `NODE_ENV` | `production` |
+Ver `.env.example` para el detalle completo.
 
 ## 🧪 **Testing de CORS**
 
-### Endpoints de Prueba
+### Endpoint de Prueba
 
-1. **Health Check** (público):
-   ```
-   GET https://app-eva-gym-canar-7c91975e103e.herokuapp.com/health
-   ```
+**Health Check** (público, no requiere autenticación):
+```
+GET $BASE_URL/health
+```
 
-2. **CORS Test** (público):
-   ```
-   GET https://app-eva-gym-canar-7c91975e103e.herokuapp.com/cors-test
-   ```
-
-3. **Auth Test** (público):
-   ```
-   POST https://app-eva-gym-canar-7c91975e103e.herokuapp.com/auth
-   ```
+> Nota: este documento describía antes un endpoint adicional `GET
+> /cors-test` que reflejaba de vuelta los headers de la petición (incluida
+> cualquier credencial que el caller enviara). Aunque solo reflejaba las
+> propias credenciales del caller (no filtraba nada de terceros), era un
+> endpoint de debug sin autenticar montado en la imagen de producción y con
+> divergencia entre el árbol de rutas probado por los tests
+> (`src/testApp.ts`) y el efectivamente montado (`src/index.ts`) — se
+> eliminó por completo. Usa `GET /health` o una llamada real a
+> `/api/v1/...`/`/onboarding/api/...` con tu API key/token para verificar
+> CORS end-to-end.
 
 ### Desde el Frontend
 
 ```javascript
-// Ejemplo con fetch
-fetch('https://app-eva-gym-canar-7c91975e103e.herokuapp.com/cors-test', {
+// Ejemplo con fetch, incluyendo la API key de tenant
+fetch(`${BASE_URL}/api/v1/issuing-company`, {
   method: 'GET',
   headers: {
-    'Content-Type': 'application/json',
+    'X-API-Key': 'sk_live_...',
   },
-  credentials: 'include', // Importante para CORS
 })
 .then(response => response.json())
 .then(data => console.log('✅ CORS working:', data))
 .catch(error => console.error('❌ CORS error:', error));
 ```
 
-## 🔧 **Configuración para Diferentes Frontends**
+## 🔧 **Configuración para Diferentes Frontends de Desarrollo**
 
-### React (localhost:3000)
-```bash
-# Ya incluido automáticamente en desarrollo
-```
+### React (localhost:3000), Angular (localhost:4200), Vue.js (localhost:8080)
 
-### Angular (localhost:4200)
-```bash
-# Ya incluido automáticamente en desarrollo
-```
-
-### Vue.js (localhost:8080)
-```bash
-# Ya incluido automáticamente en desarrollo
-```
+Ya incluidos automáticamente en desarrollo (cualquier `localhost`/`127.0.0.1`
+es permitido sin necesidad de configurar `ALLOWED_ORIGINS`).
 
 ### Frontend en Producción
+
 ```bash
-# Agregar tu dominio a ALLOWED_ORIGINS en Heroku
+# Agrega tu dominio a ALLOWED_ORIGINS en las variables de entorno de tu despliegue
+# (.env.production si usas Docker/VPS — ver DEPLOYMENT.md)
 ALLOWED_ORIGINS=https://tu-frontend.vercel.app,https://tu-frontend.netlify.app
 ```
-
-## 🚀 **Deploy**
-
-1. **Commit y push** los cambios:
-   ```bash
-   git add .
-   git commit -m "fix: configure CORS for Heroku deployment"
-   git push origin main
-   ```
-
-2. **Heroku se actualizará automáticamente** con la nueva configuración
-
-3. **Verificar** que funciona con:
-   ```bash
-   curl -H "Origin: https://tu-frontend.com" \
-        https://app-eva-gym-canar-7c91975e103e.herokuapp.com/cors-test
-   ```
 
 ## 🐛 **Debugging**
 
 Si sigues teniendo problemas:
 
-1. **Verificar logs de Heroku**:
-   ```bash
-   heroku logs --tail -a app-eva-gym-canar
-   ```
-
-2. **Buscar estos mensajes**:
+1. **Verificar los logs del servidor**, buscando mensajes como:
    ```
    🌐 CORS configured for: PRODUCTION
    📋 Allowed origins: [...]
@@ -141,27 +100,14 @@ Si sigues teniendo problemas:
    🚫 CORS blocked origin: https://otro-origen.com
    ```
 
-3. **Test temporal** (deshabilitar CORS):
+2. **Test temporal** (deshabilitar CORS — solo para diagnosticar, nunca dejarlo así en producción):
    ```bash
-   # En Heroku Config Vars
    CORS_DISABLED=true
    ```
 
 ## 📋 **Checklist de Verificación**
 
-- [ ] ✅ `cors` instalado
-- [ ] ✅ Variables de entorno configuradas en Heroku
-- [ ] ✅ Frontend usa `credentials: 'include'`
-- [ ] ✅ Backend desplegado en Heroku
-- [ ] ✅ Endpoint `/cors-test` responde correctamente
-- [ ] ✅ No hay errores en los logs de Heroku
-
-## 🎯 **Resultado Esperado**
-
-Después de la implementación, tu frontend debería poder hacer peticiones a:
-- ✅ `POST /auth` (autenticación)
-- ✅ `GET /health` (health check)
-- ✅ `GET /cors-test` (test de CORS)
-- ✅ Todos los endpoints de la API
-
-¡Tu problema de CORS debería estar resuelto! 🎉 
+- [ ] ✅ `ALLOWED_ORIGINS` configurado con el/los dominio(s) reales del frontend
+- [ ] ✅ Frontend usa `credentials: 'include'` si depende de cookies (la mayoría de integraciones vía `X-API-Key` no lo necesitan)
+- [ ] ✅ `GET /health` responde correctamente desde el origen del frontend
+- [ ] ✅ `CORS_DISABLED=false` en producción 

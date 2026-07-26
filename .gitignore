@@ -1,9 +1,24 @@
 node_modules/
 dist/
+# Build output of tsconfig.scripts.json (scripts/create-admin.ts precompiled
+# for the Docker runtime image, see Dockerfile/DEPLOYMENT.md) — same
+# rationale as dist/ above, just a distinct exact directory name so the
+# unanchored `dist/` pattern doesn't already cover it.
+dist-scripts/
 .env
+.env.production
+# Used by compose.local.yml. NOT covered by `.env.*.local` below (that pattern
+# needs a middle segment, e.g. .env.foo.local), so it needs its own entry —
+# without it a local stack's real secrets would be committable.
+.env.local
+.env.*.local
 coverage/
 *.log
 .DS_Store
 .vscode/settings.json
 .nyc_output/
-storage/
+# Anchored to repo root: this is the local-disk PDF storage dir created at
+# runtime by LocalPDFStorage (see src/services/storage/local.storage.ts),
+# not src/services/storage/ (the storage *provider* source code) — an
+# unanchored `storage/` here would gitignore that whole source directory too.
+/storage/

@@ -1,0 +1,97 @@
+# Full stack, locally, from the REAL production image.
+#
+# Why this file exists, next to the other two:
+#   compose.yml      — dev only: mongo + mongo-express, no app service. Used
+#                      when you run the API on the host with `npm run dev`.
+#   compose.prod.yml — the VPS deployment: PULLS a prebuilt image from GHCR,
+#                      has no mongo (production uses MongoDB Atlas), and puts
+#                      Caddy in front for TLS.
+#   compose.local.yml — this file: BUILDS the image from the local Dockerfile
+#                      and runs it against a throwaway mongo, so you can
+#                      exercise the actual artifact that ships — non-root
+#                      user, precompiled create-admin, bundled admin SPA,
+#                      Puppeteer's Chromium — before pushing anything.
+#
+# Deliberately NO Caddy: its automatic HTTPS needs a real public domain and
+# ports 80/443. Locally it would only add breakage, so the api port is
+# published directly instead.
+#
+# Deliberately NO published mongo port: the api reaches mongo over the compose
+# network as `mongo:27017`, so this stack cannot collide with a MongoDB you
+# already have bound to 27017 on the host (e.g. the one compose.yml starts).
+#
+#   ⚠️ APPLE SILICON / ARM HOSTS: the `platform: linux/amd64` key on the api
+#      service below is load-bearing — do NOT remove it. A native arm64 build
+#      produces an image whose Chromium cannot launch (there is no official
+#      Linux ARM64 Chrome-for-Testing build), so PDF generation fails at
+#      runtime while everything else looks healthy. With the key set, a plain
+#      `docker compose -f compose.local.yml up -d --build` does the right
+#      thing; it runs under emulation, so the first build takes several
+#      minutes. Same reasoning as the Dockerfile header.
+#
+# Usage:
+#   cp .env.example .env.local   # then set the 4 fail-fast vars, see below
+#   docker compose -f compose.local.yml up -d --build
+#   docker compose -f compose.local.yml exec api node dist-scripts/scripts/create-admin.js \
+#     admin@example.test 'ChangeMe123!'
+#   open http://localhost:3000/admin
+#   docker compose -f compose.local.yml down -v   # -v also drops the test data
+#
+# .env.local must set at least the four variables src/config/env.config.ts
+# fail-fasts on — JWT_SECRET, ENCRYPTION_KEY (exactly 64 hex chars:
+# `openssl rand -hex 32`), MONGO_URI, PUBLIC_URL — plus PDF_STORAGE_PROVIDER.
+# Use MONGO_URI=mongodb://root:example@mongo:27017/f-sri-local?authSource=admin
+# (hostname `mongo`, not localhost — it resolves on the compose network) and
+# PUBLIC_URL=http://localhost:3000. PDF_STORAGE_PROVIDER=local avoids needing
+# AWS credentials; leave RESEND_API_KEY unset and email degrades gracefully.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # See the ARM warning above — this is load-bearing on Apple Silicon.
+    platform: linux/amd64
+    restart: unless-stopped
+    env_file:
+      - .env.local
+    ports:
+      - '3000:3000'
+    depends_on:
+      mongo:
+        condition: service_healthy
+    healthcheck:
+      # Same probe as compose.prod.yml: src/index.ts calls process.exit(1) if
+      # the initial Mongo connection fails, so a broken MONGO_URI shows up
+      # here as unhealthy rather than as a container that looks "up" but never
+      # bound port 3000. `wget` ships in the runtime image already (it is part
+      # of Puppeteer's Debian dependency set).
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://localhost:3000/health']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    # Mirrors the production ceiling so local Chromium behaviour under memory
+    # pressure resembles the VPS. Raise it if you are stress-testing PDFs.
+    mem_limit: 768m
+    mem_reservation: 256m
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    # No `ports:` — reachable only from the compose network, so this never
+    # fights whatever is already on the host's 27017.
+    healthcheck:
+      test: ['CMD', 'mongosh', '--quiet', '--eval', "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    volumes:
+      - mongo_local_data:/data/db
+
+volumes:
+  mongo_local_data:

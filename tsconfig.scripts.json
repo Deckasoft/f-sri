@@ -1,0 +1,27 @@
+{
+  // Compiles the operational scripts (create-admin.ts, seed-identification-types.ts) to
+  // plain JS in dist-scripts/, so the production Docker image can run them
+  // with a plain `node` invocation instead of needing ts-node + typescript +
+  // the full src/ TypeScript source tree in the runtime stage (see
+  // Dockerfile and task-7-report.md's fix-round section for why that
+  // mattered: this container holds clients' .p12 signing certificates and
+  // emits legally-binding tax documents, so minimizing what's reachable at
+  // runtime matters more than it would for a typical app).
+  //
+  // rootDir is the repo root (not "scripts") on purpose: create-admin.ts
+  // imports sibling files from src/ via relative paths
+  // (../src/config/env.config, ../src/models/User), and tsc needs a rootDir
+  // that covers both scripts/ and src/ to preserve that directory layout in
+  // dist-scripts/ (so the compiled JS's relative requires still resolve).
+  // Only scripts/create-admin.ts is listed under "include" — tsc pulls in
+  // src/config/env.config.ts and src/models/User.ts automatically because
+  // they're reachable via import, without touching the rest of src/.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist-scripts",
+    "types": ["node"]
+  },
+  "include": ["scripts/create-admin.ts", "scripts/seed-identification-types.ts"],
+  "exclude": ["node_modules", "dist", "dist-scripts", "admin", "__tests__"]
+}

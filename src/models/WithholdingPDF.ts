@@ -2,13 +2,18 @@ import mongoose, { Schema, Document } from 'mongoose';
 
 /**
  * PDF (RIDE) de un comprobante de retención.
- * Igual que InvoicePDF, no almacena el buffer: solo la URL pública del proveedor.
+ * Igual que InvoicePDF, no almacena el buffer, solo la referencia al archivo
+ * en el proveedor. Con PDF_STORAGE_PROVIDER=s3 (default recomendado en
+ * producción), pdf_url NO es una URL pública: es la key del objeto en el
+ * bucket privado de S3 (ver src/services/storage/s3.storage.ts), y las
+ * descargas se sirven vía URLs presignadas de corta duración generadas bajo
+ * demanda. Solo es una URL pública real con los proveedores cloudinary/local.
  */
 export interface IWithholdingPDF extends Document {
   retencion_id: string;
   claveAcceso: string;
 
-  pdf_url: string;
+  pdf_url: string; // Key de S3 (proveedor s3) o URL pública (cloudinary/local) -- ver comentario arriba
   pdf_public_id: string;
   pdf_provider: string;
 

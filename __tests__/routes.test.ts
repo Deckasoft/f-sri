@@ -1,5 +1,4 @@
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
 import { createApp } from '../src/testApp';
 
 // Mock puppeteer before any imports that might use it
@@ -17,7 +16,6 @@ jest.mock('puppeteer', () => ({
 // Mock PDF utilities
 jest.mock('../src/utils/pdf.utils', () => ({
   generateInvoicePDF: jest.fn().mockResolvedValue(Buffer.from('mock-pdf-content')),
-  savePDFToFile: jest.fn().mockResolvedValue('/tmp/mock-file.pdf'),
 }));
 
 // Mock InvoicePDF model
@@ -30,6 +28,30 @@ jest.mock('../src/models/InvoicePDF', () => {
     save = invoicePDFInstanceMocks.save;
   }
   return { __esModule: true, default: MockInvoicePDF };
+});
+
+// --- ApiKey mock (apiKeyAuth runs on every /api/v1/* request) ---
+const apiKeyStaticMocks = {
+  findOne: jest.fn(),
+  findByIdAndUpdate: jest.fn().mockResolvedValue(null),
+};
+jest.mock('../src/models/ApiKey', () => ({
+  __esModule: true,
+  default: {
+    findOne: (...args: any[]) => {
+      const result = Promise.resolve(apiKeyStaticMocks.findOne(...args));
+      const query: any = result;
+      query.populate = () => result;
+      return query;
+    },
+    findByIdAndUpdate: (...args: any[]) => apiKeyStaticMocks.findByIdAndUpdate(...args),
+  },
+}));
+apiKeyStaticMocks.findOne.mockResolvedValue({
+  _id: 'api-key-1',
+  revoked_at: undefined,
+  last_used_at: undefined,
+  empresa_emisora_id: { _id: 'company-1', active: true },
 });
 
 // --- Helper to create method mocks ---
@@ -144,11 +166,23 @@ jest.mock('../src/models/IssuingCompany', () => {
     static get find() {
       return issuingCompanyStaticMocks.find;
     }
-    static get findOne() {
-      return issuingCompanyStaticMocks.findOne;
+    // Mimics a Mongoose Query: awaitable directly and chainable via .select()
+    // (buscarIssuingCompany does IssuingCompany.findOne(...).select(...) to
+    // pull in the select:false certificate fields).
+    static findOne(...args: any[]) {
+      const resultPromise = Promise.resolve(issuingCompanyStaticMocks.findOne(...args));
+      const query: any = resultPromise;
+      query.select = () => resultPromise;
+      return query;
     }
-    static get findById() {
-      return issuingCompanyStaticMocks.findById;
+    // Same chainable shape as findOne above — buscarIssuingCompany resolves
+    // the authenticated tenant's own company by id (Phase 3) via
+    // IssuingCompany.findById(companyId).select('+certificate ...').
+    static findById(...args: any[]) {
+      const resultPromise = Promise.resolve(issuingCompanyStaticMocks.findById(...args));
+      const query: any = resultPromise;
+      query.select = () => resultPromise;
+      return query;
     }
     static get findByIdAndUpdate() {
       return issuingCompanyStaticMocks.findByIdAndUpdate;
@@ -309,10 +343,26 @@ const invoiceDetail = {
   },
 };
 
+// --- Sequence Mock ---
+// Backs getNextSecuencial (src/utils/sequence.utils.ts), which
+// generarSecuencial now delegates to instead of the old
+// Invoice.findOne(...).sort(...) read-then-increment approach.
+const sequenceStaticMocks = {
+  findOneAndUpdate: jest.fn(),
+};
+jest.mock('../src/models/Sequence', () => ({
+  __esModule: true,
+  default: {
+    findOneAndUpdate: (...args: any[]) => sequenceStaticMocks.findOneAndUpdate(...args),
+  },
+}));
+const sequence = { ...sequenceStaticMocks };
+
 process.env.JWT_SECRET = 'secret';
-process.env.ENCRYPTION_KEY = 'test_encryption_key_32_bytes_long!!';
-const token = jwt.sign({ userId: '1' }, process.env.JWT_SECRET);
-const authHeader = `Bearer ${token}`;
+// Must stay a valid 64 hex char key: createApp() now validates ENCRYPTION_KEY
+// via loadEnv() (see src/config/env.config.ts) before wiring the app.
+process.env.ENCRYPTION_KEY = 'a'.repeat(64);
+const authHeader = 'sk_live_test_token_1234567890';
 const app = createApp();
 
 // File system mock for tests
@@ -332,79 +382,6 @@ jest.mock('fs', () => ({
   }),
 }));
 
-describe('Auth endpoints', () => {
-  beforeEach(() => {
-    // Reset mocks for User before each auth test
-    UserControl.findOne.mockResolvedValue(null); // Default to user not found
-    UserControl.save.mockClear(); // Clear previous save calls
-    userStaticMocks.findOne.mockResolvedValue({ password: 'hashed', _id: '1' });
-
-    // Mock IssuingCompany for registration tests
-    issuingCompany.findOne.mockResolvedValue(null); // No existing company
-    issuingCompany.save.mockImplementation(mockSaveWithToObject());
-
-    // Mock environment variables for security
-    process.env.MASTER_REGISTRATION_KEY = 'test_master_key';
-
-    // Mock User and IssuingCompany countDocuments for first registration check
-    const UserMock = jest.requireMock('../src/models/User').default;
-    const IssuingCompanyMock = jest.requireMock('../src/models/IssuingCompany').default;
-    UserMock.countDocuments = jest.fn().mockResolvedValue(0); // First registration
-    IssuingCompanyMock.countDocuments = jest.fn().mockResolvedValue(0); // First registration
-  });
-
-  it('registers a user', async () => {
-    userStaticMocks.findOne.mockResolvedValueOnce(null); // Ensure user doesn't exist for registration
-    userInstanceMocks.save.mockResolvedValueOnce({ _id: '1', email: 'a@b.c' }); // Mock save result
-    issuingCompany.findOne.mockResolvedValueOnce(null); // No existing company
-
-    const registrationData = {
-      email: 'a@b.c',
-      password: 'pass',
-      ruc: '1234567890001',
-      razon_social: 'Test Company',
-      masterKey: 'test_master_key',
-      certificate: 'MIIJqQIBAzCCCW8GCSqGSIb3DQEHAaCCCWAEgglcMIIJWDCCBW8GCSqGSIb3', // Mock base64 certificate
-      certificate_password: 'test_cert_password',
-    };
-
-    const res = await request(app).post('/register').send(registrationData);
-    expect(res.status).toBe(201);
-    expect(userInstanceMocks.save).toHaveBeenCalled();
-    expect(issuingCompany.save).toHaveBeenCalled();
-  });
-
-  it('authenticates a user', async () => {
-    const tokenRes = 'token';
-    // Mock bcrypt comparison
-    const bcrypt = require('bcryptjs');
-    jest.spyOn(bcrypt, 'compare').mockResolvedValueOnce(true);
-
-    // Ensure that the User.findOne mock resolves to the expected user for authentication
-    userStaticMocks.findOne.mockResolvedValueOnce({
-      password: '$2a$10$hashedPassword',
-      _id: 'userId123',
-      email: 'a@b.c',
-    });
-
-    // Mock company lookup
-    issuingCompany.findOne.mockResolvedValueOnce({
-      _id: 'companyId1',
-      ruc: '1234567890001',
-      razon_social: 'Test Company',
-      nombre_comercial: 'Test Company',
-    });
-
-    // Mock jwt.sign
-    jest.spyOn(require('jsonwebtoken'), 'sign').mockReturnValueOnce(tokenRes as any);
-
-    const res = await request(app).post('/auth').send({ email: 'a@b.c', password: 'pass' });
-    expect(res.status).toBe(200);
-    expect(res.body.token).toBe(tokenRes);
-    expect(userStaticMocks.findOne).toHaveBeenCalledWith({ email: 'a@b.c' });
-  });
-});
-
 describe('CRUD endpoints', () => {
   beforeEach(() => {
     // Reset relevant mocks, e.g., for identification-type
@@ -417,43 +394,21 @@ describe('CRUD endpoints', () => {
     // ... and for other models if necessary
   });
 
-  it('creates identification-type', async () => {
-    identificationType.save.mockResolvedValueOnce({ _id: 'newId', code: '01', name: 'Cedula' });
-    const res = await request(app)
-      .post('/api/v1/identification-type')
-      .set('Authorization', authHeader)
-      .send({ code: '01', name: 'Cedula' });
-    expect(res.status).toBe(201);
-    expect(identificationType.save).toHaveBeenCalled();
-  });
+  // Phase 3 removed the create/update/delete identification-type endpoints
+  // entirely from the public /api/v1 surface (it's a global, read-only SRI
+  // catalog now — see src/routes/identificationType.ts). Those three tests
+  // used to assert 201/200 here; they're covered — asserting the new,
+  // intentional 404 — by "no longer exposes mutation endpoints" in
+  // __tests__/crud.routes.test.ts, so they aren't duplicated in this file.
   it('gets identification-type list', async () => {
-    const res = await request(app).get('/api/v1/identification-type').set('Authorization', authHeader);
+    const res = await request(app).get('/api/v1/identification-type').set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
     expect(identificationType.find).toHaveBeenCalled();
   });
   it('gets identification-type by id', async () => {
-    const res = await request(app).get('/api/v1/identification-type/1').set('Authorization', authHeader);
+    const res = await request(app).get('/api/v1/identification-type/1').set('X-API-Key', authHeader);
     expect(res.status).toBe(200);
     expect(identificationType.findById).toHaveBeenCalledWith('1');
-  });
-  it('updates identification-type', async () => {
-    identificationType.findByIdAndUpdate.mockResolvedValueOnce({ _id: '1', code: '01', name: 'Cedula Actualizada' });
-    const res = await request(app)
-      .put('/api/v1/identification-type/1')
-      .set('Authorization', authHeader)
-      .send({ name: 'Cedula Actualizada' });
-    expect(res.status).toBe(200);
-    expect(identificationType.findByIdAndUpdate).toHaveBeenCalledWith(
-      '1',
-      { name: 'Cedula Actualizada' },
-      { new: true },
-    );
-  });
-  it('deletes identification-type', async () => {
-    identificationType.findByIdAndDelete.mockResolvedValueOnce({ _id: '1' });
-    const res = await request(app).delete('/api/v1/identification-type/1').set('Authorization', authHeader);
-    expect(res.status).toBe(200);
-    expect(identificationType.findByIdAndDelete).toHaveBeenCalledWith('1');
   });
 });
 
@@ -502,7 +457,7 @@ describe('Factura complete endpoint', () => {
     const certB64 = 'Q0VSVElGSUNBRE9fTU9DS19QQVJBX1BSVUVCQVMz'; // Certificado falso en base64
     const { encrypt } = require('../src/utils/encryption.utils');
 
-    issuingCompany.findOne.mockResolvedValue(
+    issuingCompany.findById.mockResolvedValue(
       createMockWithToObject({
         _id: 'companyId1',
         ruc: '1799999999001',
@@ -543,9 +498,16 @@ describe('Factura complete endpoint', () => {
       }),
     );
 
-    // Mock para generarSecuencial (Invoice.findOne(...).sort(...))
-    const mockSort = jest.fn().mockResolvedValue(null); // Por defecto, no hay ultimaFactura
-    invoice.findOne.mockReturnValue({ sort: mockSort } as any); // Invoice.findOne devuelve un objeto con un método sort mockeado
+    // Legacy setup for the old Invoice.findOne(...).sort(...) secuencial
+    // lookup; generarSecuencial no longer uses it (see Sequence mock below),
+    // kept only because it's harmless and unused.
+    const mockSort = jest.fn().mockResolvedValue(null);
+    invoice.findOne.mockReturnValue({ sort: mockSort } as any);
+
+    // Mock para generarSecuencial: contador atómico vía Sequence
+    // (src/utils/sequence.utils.ts#getNextSecuencial). Siempre devuelve
+    // 000000001 salvo que un test concreto lo sobreescriba.
+    sequence.findOneAndUpdate.mockResolvedValue({ current: 1 });
 
     // Mock para Invoice.save y InvoiceDetail.save
     invoice.save.mockImplementation(mockSaveWithToObject());
@@ -574,7 +536,7 @@ describe('Factura complete endpoint', () => {
     const certB64 = 'Q0VSVElGSUNBRE9fTU9DS19QQVJBX1BSVUVCQVMz'; // Certificado falso en base64
     const { encrypt } = require('../src/utils/encryption.utils');
 
-    issuingCompany.findOne.mockResolvedValue(
+    issuingCompany.findById.mockResolvedValue(
       createMockWithToObject({
         _id: 'companyId1',
         ruc: '1799999999001',
@@ -611,7 +573,7 @@ describe('Factura complete endpoint', () => {
     invoice.save.mockImplementation(mockSaveWithToObject());
     invoiceDetail.save.mockImplementation(mockSaveWithToObject());
 
-    const res = await request(app).post('/api/v1/invoice/complete').set('Authorization', authHeader).send(payload);
+    const res = await request(app).post('/api/v1/invoice/complete').set('X-API-Key', authHeader).send(payload);
 
     if (res.status !== 201) {
       console.log('Test Response Body on Error:', res.body);
@@ -655,7 +617,7 @@ describe('Factura complete endpoint', () => {
     const certB64 = 'Q0VSVElGSUNBRE9fTU9DS19QQVJBX1BSVUVCQVMz';
     const { encrypt } = require('../src/utils/encryption.utils');
 
-    issuingCompany.findOne.mockResolvedValue(
+    issuingCompany.findById.mockResolvedValue(
       createMockWithToObject({
         _id: 'companyId1',
         ruc: '1799999999001',
@@ -682,7 +644,7 @@ describe('Factura complete endpoint', () => {
     // El producto no existe (esto causa el error)
     product.findOne.mockResolvedValueOnce(null);
 
-    const res = await request(app).post('/api/v1/invoice/complete').set('Authorization', authHeader).send(payload);
+    const res = await request(app).post('/api/v1/invoice/complete').set('X-API-Key', authHeader).send(payload);
     expect(res.status).toBe(400);
     expect(res.body.message).toContain('Product not found: P001');
   });
@@ -701,7 +663,7 @@ describe('Factura complete endpoint', () => {
     const certB64 = 'Q0VSVElGSUNBRE9fTU9DS19QQVJBX1BSVUVCQVMz';
     const { encrypt } = require('../src/utils/encryption.utils');
 
-    issuingCompany.findOne.mockResolvedValue(
+    issuingCompany.findById.mockResolvedValue(
       createMockWithToObject({
         _id: 'companyId1',
         ruc: '1799999999001',
@@ -742,7 +704,7 @@ describe('Factura complete endpoint', () => {
       .mockImplementation(() => Promise.resolve());
 
     // Call the invoice creation endpoint
-    const res = await request(app).post('/api/v1/invoice/complete').set('Authorization', authHeader).send(payload);
+    const res = await request(app).post('/api/v1/invoice/complete').set('X-API-Key', authHeader).send(payload);
 
     // Verify that the endpoint returns 201 without waiting for SRI
     expect(res.status).toBe(201);

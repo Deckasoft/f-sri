@@ -1,5 +1,15 @@
 # Sistema de Generación de PDFs para Facturas Electrónicas
 
+> ⚠️ **Nota (vigente)**: este documento es una nota de diseño histórica.
+> Dos cosas cambiaron desde que se escribió: (1) el envío de emails, descrito
+> más abajo como "EN PREPARACIÓN" con Nodemailer, **ya está implementado**,
+> usando **Resend** (no Nodemailer) — ver `src/utils/email.utils.ts` y
+> `RESEND_API_KEY`/`EMAIL_FROM` en `.env.example`; y (2) los endpoints de
+> `/api/v1/invoice-pdf/*` ahora requieren autenticación con API key por
+> tenant (`X-API-Key`), no un `Authorization: Bearer TOKEN` de un JWT de
+> usuario. Ver `README.md`, `SECURITY.md` y `CURL_EXAMPLES.md` para el estado
+> actual.
+
 ## Descripción
 
 Se ha implementado un sistema completo para generar PDFs de facturas electrónicas que cumple con el formato oficial del SRI de Ecuador. El PDF se genera automáticamente cuando la factura es **RECIBIDA** por el SRI.
