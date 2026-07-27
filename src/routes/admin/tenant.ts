@@ -27,8 +27,19 @@ const tenantProfileSchema = z.object({
   direccion_establecimiento: z.string().optional(),
   telefono: z.string().optional(),
   email: z.string().email().optional(),
-  codigo_establecimiento: z.string().optional(),
-  punto_emision: z.string().optional(),
+  // Exactly three digits, per the SRI: they concatenate into the 6-character
+  // serie of every clave de acceso this tenant emits. A bare z.string() let a
+  // customer's "punto de emisión 1" through as "1", producing a 4-character
+  // serie in a 49-digit key -- malformed, rejected by the SRI, and not
+  // obviously traceable back to this form field.
+  codigo_establecimiento: z
+    .string()
+    .regex(/^\d{3}$/, 'Debe ser exactamente 3 dígitos (p. ej. 001)')
+    .optional(),
+  punto_emision: z
+    .string()
+    .regex(/^\d{3}$/, 'Debe ser exactamente 3 dígitos (p. ej. 001)')
+    .optional(),
   tipo_ambiente: z.union([z.literal(1), z.literal(2)]).optional(),
   tipo_emision: z.literal(1).optional(),
   obligado_contabilidad: z.boolean().optional(),

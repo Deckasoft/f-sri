@@ -188,7 +188,9 @@ const findCollisions = async (): Promise<number> => {
 /** Paso 3: el índice viejo bloquea las series nuevas, hay que soltarlo primero. */
 const dropLegacySequenceIndex = async (): Promise<boolean> => {
   const indexes = await Sequence.collection.indexes();
-  const legacy = indexes.find((idx) => idx.key && Object.keys(idx.key).join(',') === 'empresa_emisora_id,document_type');
+  const legacy = indexes.find(
+    (idx) => idx.key && Object.keys(idx.key).join(',') === 'empresa_emisora_id,document_type',
+  );
 
   if (!legacy) {
     return false;
@@ -350,7 +352,9 @@ const migrate = async (): Promise<void> => {
   await buildIndexes();
 
   console.warn(
-    APPLY ? '\n✅ Migración aplicada.' : '\n🔍 Simulacro terminado. Nada se ha escrito. Repite con --apply para aplicar.',
+    APPLY
+      ? '\n✅ Migración aplicada.'
+      : '\n🔍 Simulacro terminado. Nada se ha escrito. Repite con --apply para aplicar.',
   );
 
   await mongoose.disconnect();
