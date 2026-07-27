@@ -2,6 +2,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import forge from 'node-forge';
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+import { enqueueAuthorizationCheck } from '../../src/queue/queues';
 
 const firmarXMLMock = jest.fn().mockResolvedValue('<factura>firmada</factura>');
 jest.mock('../../src/utils/firma.utils', () => ({
@@ -431,7 +433,6 @@ describe('InvoiceService', () => {
 
     it('signs with the real P12, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      const programarSpy = jest.spyOn(InvoiceService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const factura: any = facturaDoc();
       const empresa = { ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD };
 
@@ -441,7 +442,9 @@ describe('InvoiceService', () => {
       expect(factura.sri_estado).toBe('RECIBIDA');
       expect(generateInvoicePDFMock).toHaveBeenCalled();
       expect(savedPDFs[0].estado).toBe('GENERADO');
-      expect(programarSpy).toHaveBeenCalledWith('factura-1');
+      // The authorization poll is now a queued job rather than an in-process
+      // timer; the queue module is mocked suite-wide in __tests__/setup.ts.
+      expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('01', 'factura-1');
     });
 
     it('records the DEVUELTA state without generating a PDF', async () => {
@@ -484,22 +487,6 @@ describe('InvoiceService', () => {
       invoiceStatics.findById.mockResolvedValue(null);
 
       await expect(InvoiceService.consultarAutorizacionSRI('nope')).resolves.toBeNull();
-    });
-  });
-
-  describe('programarConsultaAutorizacion', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    it('retries while pending, up to the max attempts', async () => {
-      const consultarSpy = jest
-        .spyOn(InvoiceService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'EN PROCESO' } as any);
-
-      InvoiceService.programarConsultaAutorizacion('factura-1', 1, 3, 500);
-      await jest.advanceTimersByTimeAsync(2500);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(3);
     });
   });
 

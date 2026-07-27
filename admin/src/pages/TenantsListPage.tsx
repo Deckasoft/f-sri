@@ -148,8 +148,8 @@ export const TenantsListPage = () => {
             <option value={2}>Producción</option>
           </select>
           <p className="hint-text">
-            Tras crear el tenant, configura sus secuenciales en la ficha antes de emitir: si el cliente
-            venía de otro sistema, su numeración no empieza en cero.
+            Tras crear el tenant, configura sus secuenciales en la ficha antes de emitir: si el
+            cliente venía de otro sistema, su numeración no empieza en cero.
           </p>
           {createError && <p className="error-text">{createError}</p>}
           <button type="submit" disabled={creating} data-testid={TESTID_NEW_TENANT_SUBMIT}>

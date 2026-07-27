@@ -1,3 +1,6 @@
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+import { enqueueAuthorizationCheck } from '../../src/queue/queues';
+
 const firmarXMLMock = jest.fn().mockResolvedValue('<comprobanteRetencion>firmada</comprobanteRetencion>');
 jest.mock('../../src/utils/firma.utils', () => ({
   firmarXML: (...args: any[]) => firmarXMLMock(...args),
@@ -303,7 +306,6 @@ describe('WithholdingService', () => {
     it('signs with tipoDocumento 07 and completes the RECIBIDA flow', async () => {
       verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      const programarSpy = jest.spyOn(WithholdingService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const ret: any = doc();
 
       await WithholdingService.procesarEnvioSRI(ret, empresaMock, requestValido);
@@ -317,7 +319,7 @@ describe('WithholdingService', () => {
       expect(ret.sri_estado).toBe('RECIBIDA');
       expect(generateWithholdingPDFMock).toHaveBeenCalled();
       expect(savedPDFs[0].estado).toBe('GENERADO');
-      expect(programarSpy).toHaveBeenCalledWith('ret-1');
+      expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('07', 'ret-1');
     });
 
     it('marks ERROR_PROCESO when saving fails outside the signing block', async () => {
@@ -354,22 +356,6 @@ describe('WithholdingService', () => {
       withholdingStatics.findById.mockResolvedValue(null);
 
       await expect(WithholdingService.consultarAutorizacionSRI('nope')).resolves.toBeNull();
-    });
-  });
-
-  describe('programarConsultaAutorizacion', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    it('retries while pending, up to the max attempts', async () => {
-      const consultarSpy = jest
-        .spyOn(WithholdingService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'EN PROCESO' } as any);
-
-      WithholdingService.programarConsultaAutorizacion('ret-1', 1, 3, 500);
-      await jest.advanceTimersByTimeAsync(2500);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(3);
     });
   });
 

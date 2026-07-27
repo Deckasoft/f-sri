@@ -63,6 +63,8 @@ services:
     depends_on:
       mongo:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
       # Same probe as compose.prod.yml: src/index.ts calls process.exit(1) if
       # the initial Mongo connection fails, so a broken MONGO_URI shows up
@@ -78,6 +80,41 @@ services:
     # pressure resembles the VPS. Raise it if you are stress-testing PDFs.
     mem_limit: 768m
     mem_reservation: 256m
+
+  # Same image as the api, different command — mirrors compose.prod.yml.
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    platform: linux/amd64
+    restart: unless-stopped
+    command: ['node', 'dist/worker.js']
+    env_file:
+      - .env.local
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    mem_limit: 512m
+    mem_reservation: 128m
+
+  # No volume, deliberately: the queue is an accelerator, not the source of
+  # truth. Everything in it is re-derivable from MongoDB by the reconciler,
+  # so wiping Redis costs at most one sweep interval. Published on 6380 to
+  # avoid colliding with a Redis already running on the host's default port.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ['redis-server', '--appendonly', 'no', '--save', '']
+    ports:
+      - '${REDIS_HOST_PORT:-6380}:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
   mongo:
     image: mongo:7

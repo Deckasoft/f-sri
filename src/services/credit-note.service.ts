@@ -9,7 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { emissionSeriesOf } from '../models/emissionSeries';
-import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { enqueueAuthorizationCheck } from '../queue/queues';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import CreditNote from '../models/CreditNote';
@@ -266,7 +266,7 @@ export class CreditNoteService {
             `✅ NOTA DE CRÉDITO RECIBIDA POR SRI - ID: ${notaCredito._id}, Clave: ${notaCredito.clave_acceso}, Secuencial: ${notaCredito.secuencial}`,
           );
           await this.generarPDFNotaCredito(notaCredito, empresa, cliente, productos, datos);
-          this.programarConsultaAutorizacion(String(notaCredito._id));
+          await enqueueAuthorizationCheck('04', String(notaCredito._id));
         } else {
           console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Nota de crédito ID: ${notaCredito._id}`);
         }
@@ -284,32 +284,6 @@ export class CreditNoteService {
       await notaCredito.save();
       recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
     }
-  }
-
-  /**
-   * Programa consultas de autorización al SRI con reintentos
-   */
-  static programarConsultaAutorizacion(notaCreditoId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
-    const timer = setTimeout(async () => {
-      unregisterScheduledCheck(timer);
-      try {
-        const resultado = await CreditNoteService.consultarAutorizacionSRI(notaCreditoId);
-        const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
-
-        if (pendiente && intento < maxIntentos) {
-          CreditNoteService.programarConsultaAutorizacion(notaCreditoId, intento + 1, maxIntentos, delayMs);
-        }
-      } catch (error: any) {
-        console.error('Error en la consulta de autorización automática:', error.message);
-      }
-    }, delayMs);
-
-    // Do not keep the process alive because of the scheduled check. Also
-    // registered with scheduledCheck.utils so a test that forgets to mock
-    // this away can't leave a real timer pending into a later, unrelated
-    // test — see that module's doc comment.
-    timer.unref?.();
-    registerScheduledCheck(timer);
   }
 
   /**

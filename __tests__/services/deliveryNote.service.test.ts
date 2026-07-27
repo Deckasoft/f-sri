@@ -1,3 +1,6 @@
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+import { enqueueAuthorizationCheck } from '../../src/queue/queues';
+
 const firmarXMLMock = jest.fn().mockResolvedValue('<guiaRemision>firmada</guiaRemision>');
 jest.mock('../../src/utils/firma.utils', () => ({
   firmarXML: (...args: any[]) => firmarXMLMock(...args),
@@ -280,9 +283,6 @@ describe('DeliveryNoteService', () => {
     it('signs with tipoDocumento 06 and completes the RECIBIDA flow', async () => {
       verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      const programarSpy = jest
-        .spyOn(DeliveryNoteService, 'programarConsultaAutorizacion')
-        .mockImplementation(() => {});
       const guia: any = doc();
 
       await DeliveryNoteService.procesarEnvioSRI(guia, empresaMock, requestValido);
@@ -290,7 +290,7 @@ describe('DeliveryNoteService', () => {
       expect(firmarXMLMock).toHaveBeenCalledWith('<guiaRemision/>', '/tmp/cert.p12', 'test-cert-password', '06');
       expect(guia.sri_estado).toBe('RECIBIDA');
       expect(generateDeliveryNotePDFMock).toHaveBeenCalled();
-      expect(programarSpy).toHaveBeenCalledWith('gr-1');
+      expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('06', 'gr-1');
     });
 
     it('records the DEVUELTA state and its mensajes without generating a PDF', async () => {
@@ -364,33 +364,6 @@ describe('DeliveryNoteService', () => {
       deliveryNoteStatics.findById.mockResolvedValue(null);
 
       await expect(DeliveryNoteService.consultarAutorizacionSRI('nope')).resolves.toBeNull();
-    });
-  });
-
-  describe('programarConsultaAutorizacion', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    it('stops retrying once the receipt is resolved', async () => {
-      const consultarSpy = jest
-        .spyOn(DeliveryNoteService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'NO AUTORIZADO' } as any);
-
-      DeliveryNoteService.programarConsultaAutorizacion('gr-1', 1, 3, 500);
-      await jest.advanceTimersByTimeAsync(2000);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(1);
-    });
-
-    it('retries while pending, up to the max attempts', async () => {
-      const consultarSpy = jest
-        .spyOn(DeliveryNoteService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'EN PROCESO' } as any);
-
-      DeliveryNoteService.programarConsultaAutorizacion('gr-1', 1, 3, 500);
-      await jest.advanceTimersByTimeAsync(2500);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(3);
     });
   });
 

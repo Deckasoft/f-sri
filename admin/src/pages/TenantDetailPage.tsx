@@ -162,7 +162,9 @@ export const TenantDetailPage = () => {
           // Drafts start from the stored values so an operator editing one
           // row cannot accidentally re-submit a stale number in another.
           setSequenceDrafts(
-            Object.fromEntries(data.secuenciales.map((s) => [s.document_type, String(s.ultimo_secuencial)])),
+            Object.fromEntries(
+              data.secuenciales.map((s) => [s.document_type, String(s.ultimo_secuencial)]),
+            ),
           );
           setSequenceError(null);
         })
@@ -445,16 +447,16 @@ export const TenantDetailPage = () => {
               <>
                 <p className="hint-text">
                   Serie {sequences.serie.tipo_ambiente === 1 ? 'Pruebas' : 'Producción'} ·{' '}
-                  {sequences.serie.codigo_establecimiento}-{sequences.serie.punto_emision}. Indica el{' '}
-                  <strong>último</strong> secuencial que el cliente ya emitió en su sistema anterior; el
-                  siguiente comprobante usará ese número más uno. Solo se puede aumentar: bajarlo genera
-                  claves de acceso duplicadas que el SRI rechaza.
+                  {sequences.serie.codigo_establecimiento}-{sequences.serie.punto_emision}. Indica
+                  el <strong>último</strong> secuencial que el cliente ya emitió en su sistema
+                  anterior; el siguiente comprobante usará ese número más uno. Solo se puede
+                  aumentar: bajarlo genera claves de acceso duplicadas que el SRI rechaza.
                 </p>
                 {apiKeys.some((key) => !key.revoked_at) &&
                   sequences.secuenciales.some((s) => !s.existe) && (
                     <p className="error-text" data-testid={TESTID_SEQUENCE_UNSEEDED_WARNING}>
-                      Este tenant ya puede emitir (tiene una clave de API activa) pero hay secuenciales sin
-                      configurar. Los que falten empezarán en 000000001.
+                      Este tenant ya puede emitir (tiene una clave de API activa) pero hay
+                      secuenciales sin configurar. Los que falten empezarán en 000000001.
                     </p>
                   )}
                 <table>
@@ -467,7 +469,10 @@ export const TenantDetailPage = () => {
                   </thead>
                   <tbody>
                     {sequences.secuenciales.map((row) => (
-                      <tr key={row.document_type} data-testid={`${TESTID_SEQUENCE_ROW}-${row.document_type}`}>
+                      <tr
+                        key={row.document_type}
+                        data-testid={`${TESTID_SEQUENCE_ROW}-${row.document_type}`}
+                      >
                         <td>
                           {row.label} ({row.document_type})
                         </td>
@@ -504,8 +509,8 @@ export const TenantDetailPage = () => {
                   <>
                     <h3>Otras series</h3>
                     <p className="hint-text">
-                      Contadores de series en las que este tenant ya no emite — normalmente su numeración de
-                      pruebas tras pasar a producción. Se conservan intactos.
+                      Contadores de series en las que este tenant ya no emite — normalmente su
+                      numeración de pruebas tras pasar a producción. Se conservan intactos.
                     </p>
                     <ul>
                       {sequences.otras_series.map((other) => (
@@ -513,8 +518,8 @@ export const TenantDetailPage = () => {
                           key={`${other.tipo_ambiente}-${other.codigo_establecimiento}-${other.punto_emision}-${other.document_type}`}
                         >
                           {other.tipo_ambiente === 1 ? 'Pruebas' : 'Producción'} ·{' '}
-                          {other.codigo_establecimiento}-{other.punto_emision} · {other.document_type}:{' '}
-                          {other.ultimo_secuencial}
+                          {other.codigo_establecimiento}-{other.punto_emision} ·{' '}
+                          {other.document_type}: {other.ultimo_secuencial}
                         </li>
                       ))}
                     </ul>

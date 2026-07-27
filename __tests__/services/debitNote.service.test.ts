@@ -1,3 +1,6 @@
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+import { enqueueAuthorizationCheck } from '../../src/queue/queues';
+
 const firmarXMLMock = jest.fn().mockResolvedValue('<notaDebito>firmada</notaDebito>');
 jest.mock('../../src/utils/firma.utils', () => ({
   firmarXML: (...args: any[]) => firmarXMLMock(...args),
@@ -258,7 +261,6 @@ describe('DebitNoteService', () => {
     it('signs with tipoDocumento 05 and completes the RECIBIDA flow', async () => {
       verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      const programarSpy = jest.spyOn(DebitNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const nota: any = doc();
 
       await DebitNoteService.procesarEnvioSRI(nota, empresaMock, clienteMock, requestValido);
@@ -267,7 +269,7 @@ describe('DebitNoteService', () => {
       expect(nota.sri_estado).toBe('RECIBIDA');
       expect(generateDebitNotePDFMock).toHaveBeenCalled();
       expect(savedPDFs[0].estado).toBe('GENERADO');
-      expect(programarSpy).toHaveBeenCalledWith('nd-1');
+      expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('05', 'nd-1');
     });
 
     it('records signing errors as ERROR_FIRMA', async () => {
@@ -301,22 +303,6 @@ describe('DebitNoteService', () => {
       debitNoteStatics.findById.mockResolvedValue(null);
 
       await expect(DebitNoteService.consultarAutorizacionSRI('nope')).resolves.toBeNull();
-    });
-  });
-
-  describe('programarConsultaAutorizacion', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    it('retries while pending and stops at maxIntentos', async () => {
-      const consultarSpy = jest
-        .spyOn(DebitNoteService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'EN PROCESO' } as any);
-
-      DebitNoteService.programarConsultaAutorizacion('nd-1', 1, 2, 500);
-      await jest.advanceTimersByTimeAsync(2000);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(2);
     });
   });
 

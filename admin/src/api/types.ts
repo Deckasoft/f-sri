@@ -36,8 +36,14 @@ export const newTenantSchema = z.object({
   // (001/001/pruebas): these two concatenate into the 6-character serie of
   // every clave de acceso the tenant emits, and together with the ambiente
   // they identify the numbering series its counters belong to.
-  codigo_establecimiento: z.string().regex(/^\d{3}$/, 'Exactamente 3 dígitos').optional(),
-  punto_emision: z.string().regex(/^\d{3}$/, 'Exactamente 3 dígitos').optional(),
+  codigo_establecimiento: z
+    .string()
+    .regex(/^\d{3}$/, 'Exactamente 3 dígitos')
+    .optional(),
+  punto_emision: z
+    .string()
+    .regex(/^\d{3}$/, 'Exactamente 3 dígitos')
+    .optional(),
   tipo_ambiente: z.union([z.literal(1), z.literal(2)]).optional(),
 });
 export type NewTenantInput = z.infer<typeof newTenantSchema>;
