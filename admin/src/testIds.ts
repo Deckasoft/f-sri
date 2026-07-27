@@ -29,6 +29,18 @@ export const TESTID_SHOW_ONCE_SECRET_VALUE = 'show-once-secret-value';
 export const TESTID_SHOW_ONCE_SECRET_COPY = 'show-once-secret-copy';
 export const TESTID_SHOW_ONCE_SECRET_DISMISS = 'show-once-secret-dismiss';
 
+export const TESTID_NEW_TENANT_CODIGO_ESTABLECIMIENTO = 'new-tenant-codigo-establecimiento';
+export const TESTID_NEW_TENANT_PUNTO_EMISION = 'new-tenant-punto-emision';
+export const TESTID_NEW_TENANT_TIPO_AMBIENTE = 'new-tenant-tipo-ambiente';
+
+export const TESTID_SEQUENCE_INPUT = 'sequence-input';
+export const TESTID_SEQUENCE_SAVE = 'sequence-save';
+export const TESTID_SEQUENCE_ROW = 'sequence-row';
+// Shown when a tenant can already emit (it has an active API key) but its
+// counters were never seeded — the window in which a migrated tenant would
+// silently restart at 000000001.
+export const TESTID_SEQUENCE_UNSEEDED_WARNING = 'sequence-unseeded-warning';
+
 export const TESTID_ONBOARDING_FILE_INPUT = 'onboarding-file-input';
 export const TESTID_ONBOARDING_PASSWORD_INPUT = 'onboarding-password-input';
 export const TESTID_ONBOARDING_EMAIL_INPUT = 'onboarding-email-input';
