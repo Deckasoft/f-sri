@@ -667,7 +667,7 @@ export default {
         tags: ['PDF Management'],
         summary: 'Solicitar el envío del PDF por email',
         description:
-          'Marca el PDF para envío por email al destinatario indicado (estado PENDIENTE). El envío se procesa de forma asíncrona.',
+          'Envía el PDF por email al destinatario indicado. El envío es SÍNCRONO: la respuesta ya refleja el resultado (email_estado ENVIADO o ERROR). Las facturas autorizadas se envían solas a través de la cola; este endpoint es para reenvíos manuales o para dirigir el RIDE a otro destinatario.',
         parameters: [
           {
             name: 'claveAcceso',
@@ -1331,9 +1331,15 @@ export default {
           codigo: { type: 'string', example: 'PROD001' },
           descripcion: { type: 'string', example: 'Producto de Ejemplo' },
           precio_unitario: { type: 'number', example: 10.99 },
-          // Add more fields according to your Product model
+          tiene_iva: {
+            type: 'boolean',
+            example: true,
+            description:
+              'Si el producto grava IVA. Obligatorio: determina el cálculo de impuestos del comprobante (ver src/utils/xml.utils.ts).',
+          },
+          descripcion_adicional: { type: 'string', example: 'Detalle opcional' },
         },
-        required: ['codigo', 'descripcion', 'precio_unitario'],
+        required: ['codigo', 'descripcion', 'precio_unitario', 'tiene_iva'],
       },
       FacturaUpdatePayload: {
         type: 'object',
@@ -1375,10 +1381,13 @@ export default {
       Producto: {
         type: 'object',
         properties: {
+          _id: { type: 'string' },
+          empresa_emisora_id: { type: 'string' },
           codigo: { type: 'string' },
-          nombre: { type: 'string' },
-          precio_venta: { type: 'number' },
-          // Add more fields according to your Product model
+          descripcion: { type: 'string' },
+          precio_unitario: { type: 'number' },
+          tiene_iva: { type: 'boolean' },
+          descripcion_adicional: { type: 'string' },
         },
       },
       FacturaUpdate: {

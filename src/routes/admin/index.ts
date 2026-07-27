@@ -2,6 +2,7 @@ import { Router } from 'express';
 import tenantRoutes from './tenant';
 import apiKeyRoutes from './apiKey';
 import inviteRoutes from './invite';
+import sequenceRoutes from './sequence';
 import usageRoutes from './usage';
 
 /**
@@ -25,6 +26,7 @@ const router = Router();
 
 router.use('/tenants/:id/api-keys', apiKeyRoutes);
 router.use('/tenants/:id/invites', inviteRoutes);
+router.use('/tenants/:id/sequences', sequenceRoutes);
 router.use('/tenants', tenantRoutes);
 router.use('/', usageRoutes);
 

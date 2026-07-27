@@ -1,10 +1,14 @@
 import { Schema, model, Document, Types } from 'mongoose';
+import { applyEmissionSeriesIndex, emissionSeriesFields } from './emissionSeries';
 
 export interface IWithholding extends Document {
   empresa_emisora_id: Types.ObjectId;
   fecha_emision: Date;
   clave_acceso: string;
   secuencial: string;
+  tipo_ambiente: number;
+  codigo_establecimiento: string;
+  punto_emision: string;
   estado: string;
   tipo_identificacion_sujeto_retenido: string;
   razon_social_sujeto_retenido: string;
@@ -28,6 +32,7 @@ const schema = new Schema<IWithholding>({
   fecha_emision: { type: Date, required: true },
   clave_acceso: { type: String, required: true },
   secuencial: { type: String, required: true },
+  ...emissionSeriesFields,
   estado: { type: String, required: true },
   tipo_identificacion_sujeto_retenido: { type: String, required: true },
   razon_social_sujeto_retenido: { type: String, required: true },
@@ -45,5 +50,7 @@ const schema = new Schema<IWithholding>({
   sri_fecha_respuesta: { type: Date },
   datos_originales: { type: String },
 });
+
+applyEmissionSeriesIndex(schema);
 
 export default model<IWithholding>('Withholding', schema);

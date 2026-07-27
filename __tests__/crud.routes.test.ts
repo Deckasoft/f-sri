@@ -219,15 +219,34 @@ describe('apiKeyAuth middleware', () => {
 // by id use findOne/findOneAndUpdate/findOneAndDelete scoped to
 // { _id, empresa_emisora_id }, 404ing (never leaking existence) for another
 // tenant's record.
+// Most of these routes accept an arbitrary body, so the scoping assertions
+// can use a placeholder payload. /api/v1/product is the exception: it
+// validates with zod (src/routes/product.ts), so it needs a real product.
+// The tenant-scoping contract under test is identical either way — only the
+// body differs, hence the per-route payloads below.
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { enqueuePdfGeneration } = require('../src/queue/queues');
+
+const createGenericBody = () => ({ campo: 'valor' });
+const updateGenericBody = () => ({ a: 1 });
+const createMockProduct = () => ({
+  codigo: 'P001',
+  descripcion: 'Producto de Ejemplo',
+  precio_unitario: 10.5,
+  tiene_iva: true,
+});
+const updateMockProduct = () => ({ precio_unitario: 12.5 });
+
 describe.each([
-  ['client', clientMock],
-  ['product', productMock],
-  ['invoice', invoiceMock],
-  ['credit-note', creditNoteMock],
-  ['debit-note', debitNoteMock],
-  ['delivery-note', deliveryNoteMock],
-  ['withholding', withholdingMock],
-])('Tenant-scoped CRUD /api/v1/%s', (ruta, mock) => {
+  ['client', clientMock, createGenericBody, updateGenericBody],
+  ['product', productMock, createMockProduct, updateMockProduct],
+  ['invoice', invoiceMock, createGenericBody, updateGenericBody],
+  ['credit-note', creditNoteMock, createGenericBody, updateGenericBody],
+  ['debit-note', debitNoteMock, createGenericBody, updateGenericBody],
+  ['delivery-note', deliveryNoteMock, createGenericBody, updateGenericBody],
+  ['withholding', withholdingMock, createGenericBody, updateGenericBody],
+])('Tenant-scoped CRUD /api/v1/%s', (ruta, mock, createBody, updateBody) => {
   beforeEach(() => {
     jest.clearAllMocks();
     saved.length = 0;
@@ -237,7 +256,7 @@ describe.each([
     const res = await request(app)
       .post(`/api/v1/${ruta}`)
       .set('X-API-Key', authHeader)
-      .send({ campo: 'valor', empresa_emisora_id: 'someone-elses-company' });
+      .send({ ...createBody(), empresa_emisora_id: 'someone-elses-company' });
 
     expect(res.status).toBe(201);
     expect(saved).toHaveLength(1);
@@ -266,11 +285,11 @@ describe.each([
 
   it('updates and deletes documents scoped to the tenant, 404ing for another tenant’s record', async () => {
     mock.statics.findOneAndUpdate.mockResolvedValueOnce({ _id: ID, actualizado: true });
-    let res = await request(app).put(`/api/v1/${ruta}/${ID}`).set('X-API-Key', authHeader).send({ a: 1 });
+    let res = await request(app).put(`/api/v1/${ruta}/${ID}`).set('X-API-Key', authHeader).send(updateBody());
     expect(res.status).toBe(200);
     expect(mock.statics.findOneAndUpdate).toHaveBeenCalledWith(
       { _id: ID, empresa_emisora_id: ACTIVE_COMPANY_ID },
-      { a: 1 },
+      updateBody(),
       { new: true },
     );
 
@@ -292,10 +311,10 @@ describe.each([
     await request(app)
       .put(`/api/v1/${ruta}/${ID}`)
       .set('X-API-Key', authHeader)
-      .send({ a: 1, empresa_emisora_id: 'someone-elses-company' });
+      .send({ ...updateBody(), empresa_emisora_id: 'someone-elses-company' });
 
     const [, updateData] = mock.statics.findOneAndUpdate.mock.calls[0];
-    expect(updateData).toEqual({ a: 1 });
+    expect(updateData).toEqual(updateBody());
   });
 
   it('returns 500 when the database fails', async () => {
@@ -705,13 +724,17 @@ describe('InvoicePDF routes (scoped via parent Invoice lookup)', () => {
     expect(res.status).toBe(404);
   });
 
-  it('acknowledges PDF regeneration requests for the tenant’s own invoice', async () => {
+  // This endpoint used to return 200 without doing anything at all. It now
+  // enqueues the job the worker consumes, so it answers 202 (accepted, work
+  // happens out of band) rather than 200 (done).
+  it('enqueues PDF regeneration for the tenant’s own invoice', async () => {
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
 
     const res = await request(app).post(`/api/v1/invoice-pdf/regenerate/${ID}`).set('X-API-Key', authHeader);
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(res.body.facturaId).toBe(ID);
+    expect(enqueuePdfGeneration).toHaveBeenCalledWith('01', ID);
   });
 
   it('sends the email and reports email status for the tenant’s own invoice', async () => {

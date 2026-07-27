@@ -5,15 +5,24 @@ import {
   createInvite,
   deleteInvite,
   getTenant,
+  getTenantSequences,
   getTenantUsage,
   listApiKeys,
   listInvites,
   revokeApiKey,
+  seedTenantSequence,
   setTenantActive,
   updateTenant,
 } from '../api/adminApi';
 import { ApiError } from '../api/client';
-import type { ApiKeyItem, InviteItem, Tenant, TenantProfileInput, UsageRow } from '../api/types';
+import type {
+  ApiKeyItem,
+  InviteItem,
+  Tenant,
+  TenantProfileInput,
+  TenantSequences,
+  UsageRow,
+} from '../api/types';
 import { ShowOnceSecret } from '../components/ShowOnceSecret';
 import { useAuth } from '../context/useAuth';
 import {
@@ -24,6 +33,10 @@ import {
   TESTID_INVITE_CREATE_BUTTON,
   TESTID_INVITE_DELETE_BUTTON,
   TESTID_INVITE_LIST,
+  TESTID_SEQUENCE_INPUT,
+  TESTID_SEQUENCE_ROW,
+  TESTID_SEQUENCE_SAVE,
+  TESTID_SEQUENCE_UNSEEDED_WARNING,
   TESTID_TENANT_ACTIVE_TOGGLE,
   TESTID_TENANT_PROFILE_FORM,
   TESTID_TENANT_PROFILE_SAVE,
@@ -82,6 +95,12 @@ export const TenantDetailPage = () => {
 
   const [usageError, setUsageError] = useState<string | null>(null);
 
+  const [sequences, setSequences] = useState<TenantSequences | null>(null);
+  const [sequenceDrafts, setSequenceDrafts] = useState<Record<string, string>>({});
+  const [savingSequence, setSavingSequence] = useState<string | null>(null);
+  const [sequenceError, setSequenceError] = useState<string | null>(null);
+  const [sequenceNotice, setSequenceNotice] = useState<string | null>(null);
+
   // `isStale` is checked before every setState below: navigating between
   // tenants (id changes) re-runs this effect, and without the check a
   // slower response for the PREVIOUS tenant could resolve after a faster
@@ -135,6 +154,26 @@ export const TenantDetailPage = () => {
           if (isStale()) return;
           setUsageError(err instanceof ApiError ? err.message : 'No se pudo cargar el uso');
         });
+
+      getTenantSequences(token, tenantId)
+        .then((data) => {
+          if (isStale()) return;
+          setSequences(data);
+          // Drafts start from the stored values so an operator editing one
+          // row cannot accidentally re-submit a stale number in another.
+          setSequenceDrafts(
+            Object.fromEntries(
+              data.secuenciales.map((s) => [s.document_type, String(s.ultimo_secuencial)]),
+            ),
+          );
+          setSequenceError(null);
+        })
+        .catch((err: unknown) => {
+          if (isStale()) return;
+          setSequenceError(
+            err instanceof ApiError ? err.message : 'No se pudieron cargar los secuenciales',
+          );
+        });
     },
     [token],
   );
@@ -165,6 +204,47 @@ export const TenantDetailPage = () => {
         setLoadError(err instanceof ApiError ? err.message : 'No se pudo cambiar el estado'),
       )
       .finally(() => setTogglingActive(false));
+  };
+
+  const handleSeedSequence = (documentType: string): void => {
+    const raw = (sequenceDrafts[documentType] ?? '').trim();
+    const value = Number(raw);
+    if (raw === '' || !Number.isInteger(value) || value < 0) {
+      setSequenceError('El último secuencial debe ser un número entero de 0 o más');
+      return;
+    }
+
+    setSequenceError(null);
+    setSequenceNotice(null);
+    setSavingSequence(documentType);
+    seedTenantSequence(token, id, documentType, value)
+      .then((result) => {
+        setSequences((prev) =>
+          prev
+            ? {
+                ...prev,
+                secuenciales: prev.secuenciales.map((s) =>
+                  s.document_type === documentType
+                    ? { ...s, ultimo_secuencial: result.ultimo_secuencial, existe: true }
+                    : s,
+                ),
+              }
+            : prev,
+        );
+        setSequenceNotice(
+          result.actualizado
+            ? `Guardado. El próximo comprobante será ${result.proximo_secuencial}.`
+            : `Sin cambios: ya estaba en ${result.ultimo_secuencial}.`,
+        );
+      })
+      .catch((err: unknown) =>
+        // A 409 here is the raise-only rule refusing to lower the counter;
+        // the API's message explains why, so surface it verbatim.
+        setSequenceError(
+          err instanceof ApiError ? err.message : 'No se pudo guardar el secuencial',
+        ),
+      )
+      .finally(() => setSavingSequence(null));
   };
 
   const handleSaveProfile = (event: FormEvent<HTMLFormElement>): void => {
@@ -359,6 +439,96 @@ export const TenantDetailPage = () => {
                 {savingProfile ? 'Guardando…' : 'Guardar cambios'}
               </button>
             </form>
+          </section>
+
+          <section className="card">
+            <h2>Secuenciales</h2>
+            {sequences && (
+              <>
+                <p className="hint-text">
+                  Serie {sequences.serie.tipo_ambiente === 1 ? 'Pruebas' : 'Producción'} ·{' '}
+                  {sequences.serie.codigo_establecimiento}-{sequences.serie.punto_emision}. Indica
+                  el <strong>último</strong> secuencial que el cliente ya emitió en su sistema
+                  anterior; el siguiente comprobante usará ese número más uno. Solo se puede
+                  aumentar: bajarlo genera claves de acceso duplicadas que el SRI rechaza.
+                </p>
+                {apiKeys.some((key) => !key.revoked_at) &&
+                  sequences.secuenciales.some((s) => !s.existe) && (
+                    <p className="error-text" data-testid={TESTID_SEQUENCE_UNSEEDED_WARNING}>
+                      Este tenant ya puede emitir (tiene una clave de API activa) pero hay
+                      secuenciales sin configurar. Los que falten empezarán en 000000001.
+                    </p>
+                  )}
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Comprobante</th>
+                      <th>Último secuencial emitido</th>
+                      <th />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {sequences.secuenciales.map((row) => (
+                      <tr
+                        key={row.document_type}
+                        data-testid={`${TESTID_SEQUENCE_ROW}-${row.document_type}`}
+                      >
+                        <td>
+                          {row.label} ({row.document_type})
+                        </td>
+                        <td>
+                          <input
+                            type="number"
+                            min={0}
+                            aria-label={`Último secuencial emitido de ${row.label}`}
+                            data-testid={`${TESTID_SEQUENCE_INPUT}-${row.document_type}`}
+                            value={sequenceDrafts[row.document_type] ?? ''}
+                            onChange={(event) =>
+                              setSequenceDrafts({
+                                ...sequenceDrafts,
+                                [row.document_type]: event.target.value,
+                              })
+                            }
+                          />
+                        </td>
+                        <td>
+                          <button
+                            type="button"
+                            disabled={savingSequence === row.document_type}
+                            data-testid={`${TESTID_SEQUENCE_SAVE}-${row.document_type}`}
+                            onClick={() => handleSeedSequence(row.document_type)}
+                          >
+                            {savingSequence === row.document_type ? 'Guardando…' : 'Guardar'}
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {sequences.otras_series.length > 0 && (
+                  <>
+                    <h3>Otras series</h3>
+                    <p className="hint-text">
+                      Contadores de series en las que este tenant ya no emite — normalmente su
+                      numeración de pruebas tras pasar a producción. Se conservan intactos.
+                    </p>
+                    <ul>
+                      {sequences.otras_series.map((other) => (
+                        <li
+                          key={`${other.tipo_ambiente}-${other.codigo_establecimiento}-${other.punto_emision}-${other.document_type}`}
+                        >
+                          {other.tipo_ambiente === 1 ? 'Pruebas' : 'Producción'} ·{' '}
+                          {other.codigo_establecimiento}-{other.punto_emision} ·{' '}
+                          {other.document_type}: {other.ultimo_secuencial}
+                        </li>
+                      ))}
+                    </ul>
+                  </>
+                )}
+              </>
+            )}
+            {sequenceNotice && <p className="hint-text">{sequenceNotice}</p>}
+            {sequenceError && <p className="error-text">{sequenceError}</p>}
           </section>
 
           <section className="card">

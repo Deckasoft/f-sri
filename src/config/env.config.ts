@@ -20,6 +20,12 @@ const envSchema = z.object({
   // same fail-fast reasoning as the other vars in this schema. Phase 7's
   // deployment doc lists it as a required production env var for this reason.
   PUBLIC_URL: z.string().url('PUBLIC_URL debe ser una URL válida (p. ej. https://api.tuempresa.com)'),
+  // Required, not optional: the authorization poll, and with it the PDF and
+  // the email, run on the queue. Degrading to "no queue configured" would
+  // mean comprobantes are sent to the SRI and then never asked about again —
+  // silently, per document. Failing at startup is the lesser harm, and
+  // matches how the other vars here are treated.
+  REDIS_URL: z.string().min(1, 'REDIS_URL no puede estar vacío (p. ej. redis://redis:6379)'),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -39,6 +45,7 @@ export const loadEnv = (): Env => {
     ENCRYPTION_KEY: process.env.ENCRYPTION_KEY,
     MONGO_URI: process.env.MONGO_URI,
     PUBLIC_URL: process.env.PUBLIC_URL,
+    REDIS_URL: process.env.REDIS_URL,
   });
 
   if (!parsed.success) {

@@ -51,9 +51,16 @@ const buildObjectKey = (filename: string): string => {
   return `pdfs/${ruc}/${claveAcceso}.pdf`;
 };
 
+/**
+ * Solo `region` y `bucket` son obligatorios aquí.
+ *
+ * Las credenciales las resuelve la cadena de proveedores por defecto del SDK
+ * de AWS, que además de AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY contempla
+ * AWS_SESSION_TOKEN, roles de instancia (EC2/ECS) e IAM Roles Anywhere. Si se
+ * exigieran aquí, esos modos —en los que no existe ninguna variable de
+ * entorno con la clave— quedarían descartados de entrada.
+ */
 const s3ConfigSchema = z.object({
-  accessKeyId: z.string().min(1, 'AWS_ACCESS_KEY_ID no puede estar vacío'),
-  secretAccessKey: z.string().min(1, 'AWS_SECRET_ACCESS_KEY no puede estar vacío'),
   region: z.string().min(1, 'AWS_REGION no puede estar vacío'),
   bucket: z.string().min(1, 'S3_BUCKET no puede estar vacío'),
 });
@@ -64,8 +71,6 @@ export class S3PDFStorage implements IPDFStorageProvider {
 
   constructor() {
     const parsed = s3ConfigSchema.safeParse({
-      accessKeyId: process.env.AWS_ACCESS_KEY_ID,
-      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
       region: process.env.AWS_REGION,
       bucket: process.env.S3_BUCKET,
     });
@@ -76,13 +81,17 @@ export class S3PDFStorage implements IPDFStorageProvider {
     }
 
     this.bucket = parsed.data.bucket;
-    this.client = new S3Client({
-      region: parsed.data.region,
-      credentials: {
-        accessKeyId: parsed.data.accessKeyId,
-        secretAccessKey: parsed.data.secretAccessKey,
-      },
-    });
+    // Sin bloque `credentials`: al omitirlo, el SDK usa su cadena de
+    // proveedores por defecto. Antes se pasaban accessKeyId/secretAccessKey a
+    // mano y NO se pasaba sessionToken, así que cualquier credencial temporal
+    // (SSO, assume-role, cualquier llamada a STS) era rechazada por S3.
+    //
+    // La cadena además REFRESCA credenciales temporales por su cuenta. Este
+    // cliente se construye una sola vez (PDFStorageFactory es un singleton),
+    // de modo que con credenciales manuales y temporales el proceso empezaba
+    // a devolver 403 horas después del despliegue y no se recuperaba hasta
+    // reiniciar el contenedor.
+    this.client = new S3Client({ region: parsed.data.region });
   }
 
   /**

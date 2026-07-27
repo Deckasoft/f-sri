@@ -6,8 +6,9 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, RespuestaSRI, Autorizaci
 import { generateInvoicePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
-import { getNextSecuencial } from '../utils/sequence.utils';
-import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
+import { emissionSeriesOf } from '../models/emissionSeries';
+import { enqueueAuthorizationCheck, enqueuePdfGeneration } from '../queue/queues';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import Invoice from '../models/Invoice';
@@ -37,8 +38,8 @@ export class InvoiceService {
    * sumar 1", que podía asignar el mismo secuencial dos veces bajo peticiones
    * concurrentes para el mismo tenant.
    */
-  static async generarSecuencial(companyId: string): Promise<string> {
-    return getNextSecuencial(companyId, '01');
+  static async generarSecuencial(empresa: EmissionPoint): Promise<string> {
+    return getNextSecuencial(empresa, '01');
   }
 
   /**
@@ -136,6 +137,7 @@ export class InvoiceService {
       fecha_emision: datos.fechaEmision,
       clave_acceso: datos.claveAcceso,
       secuencial: datos.secuencial,
+      ...datos.serie,
       estado: 'CREADA',
       total_sin_impuestos: datos.totalSinImpuestos,
       total_iva: datos.totalIva,
@@ -193,7 +195,7 @@ export class InvoiceService {
     }
 
     const productos = await this.buscarProducts(datosFactura.detalles, companyId);
-    const secuencial = await this.generarSecuencial(companyId);
+    const secuencial = await this.generarSecuencial(empresa);
     const fechaEmision = convertirFecha(datosFactura.infoFactura.fechaEmision);
 
     if (isNaN(fechaEmision.getTime())) {
@@ -248,6 +250,7 @@ export class InvoiceService {
       fechaEmision,
       claveAcceso,
       secuencial,
+      serie: emissionSeriesOf(empresa),
       totalSinImpuestos,
       totalIva,
       totalConImpuestos,
@@ -344,8 +347,11 @@ export class InvoiceService {
             console.log(
               `✅ FACTURA RECIBIDA POR SRI - ID: ${factura._id}, Clave: ${factura.clave_acceso}, Secuencial: ${factura.secuencial}`,
             );
-            await this.generarPDFFactura(factura, empresa, cliente, productos, datosFactura);
-            this.programarConsultaAutorizacion(String(factura._id));
+            // No PDF here. The RIDE is generated once the SRI AUTHORIZES the
+            // comprobante (see consultarAutorizacionSRI), not on recepción:
+            // a document can be RECIBIDA and then rejected, and until it is
+            // authorized there is no authorization date to print on it.
+            await enqueueAuthorizationCheck('01', String(factura._id));
           } else {
             console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Factura ID: ${factura._id}`);
           }
@@ -375,6 +381,40 @@ export class InvoiceService {
    * @param productos The products
    * @param datosFactura Original invoice data
    */
+  /**
+   * Rebuilds everything the RIDE needs from persisted state, given only an
+   * invoice id.
+   *
+   * The PDF is now produced by a worker that receives a job carrying just an
+   * id, not the rich context the emission request had. All of it is
+   * recoverable: the original request body is persisted verbatim on the
+   * invoice as datos_originales precisely so the RIDE can be regenerated
+   * later without it.
+   */
+  static async generarPDFDesdeId(facturaId: string): Promise<void> {
+    const factura = await Invoice.findById(facturaId);
+    if (!factura) {
+      throw new Error(`Factura ${facturaId} no encontrada`);
+    }
+    if (!factura.datos_originales) {
+      throw new Error(`Factura ${facturaId} no tiene datos_originales: no se puede regenerar el RIDE`);
+    }
+
+    const empresa = await IssuingCompany.findById(factura.empresa_emisora_id);
+    if (!empresa) {
+      throw new Error(`La empresa emisora de la factura ${facturaId} ya no existe`);
+    }
+    const cliente = await Client.findById(factura.cliente_id);
+    if (!cliente) {
+      throw new Error(`El cliente de la factura ${facturaId} ya no existe`);
+    }
+
+    const datosFactura: InvoiceRequest = JSON.parse(factura.datos_originales);
+    const productos = await this.buscarProducts(datosFactura.detalles, String(factura.empresa_emisora_id));
+
+    await this.generarPDFFactura(factura, empresa, cliente, productos, datosFactura);
+  }
+
   static async generarPDFFactura(
     factura: any,
     empresa: IIssuingCompany,
@@ -383,8 +423,22 @@ export class InvoiceService {
     datosFactura: InvoiceRequest,
   ): Promise<void> {
     try {
-      const numeroAutorizacion = factura.clave_acceso;
-      const fechaAutorizacion = factura.sri_fecha_respuesta || new Date();
+      // The RIDE has to carry the SRI's real authorization date. It used to
+      // be generated on recepción, before an authorization existed, and fell
+      // back to the recepción timestamp -- a wrong date on a legal document,
+      // invisible against the SRI test environment because authorization
+      // there is near-instant. Refusing outright is what keeps that from
+      // silently coming back.
+      if (!factura.fecha_autorizacion) {
+        throw new Error(
+          `No se puede generar el RIDE de la factura ${factura.secuencial}: todavía no tiene fecha de autorización del SRI`,
+        );
+      }
+      // In the offline scheme the authorization number IS the clave de
+      // acceso, which is why the fallback is correct rather than a guess --
+      // consultarAutorizacionSRI stores it the same way.
+      const numeroAutorizacion = factura.autorizacion_numero || factura.clave_acceso;
+      const fechaAutorizacion = factura.fecha_autorizacion;
 
       // Preparar datos para generar el PDF
       const pdfData = {
@@ -413,19 +467,26 @@ export class InvoiceService {
 
       // Guardar la información del PDF en la base de datos
       // IMPORTANTE: Ya NO guardamos el pdf_buffer para ahorrar espacio
-      const invoicePDF = new InvoicePDF({
-        factura_id: factura._id,
-        claveAcceso: factura.clave_acceso,
-        pdf_url: uploadResult.url, // Key de S3 (proveedor s3) o URL pública (cloudinary/local) -- ver src/models/InvoicePDF.ts
-        pdf_public_id: uploadResult.publicId, // ID para eliminar/gestionar el archivo
-        pdf_provider: uploadResult.provider, // Proveedor usado (cloudinary, local, etc.)
-        tamano_archivo: uploadResult.size,
-        numero_autorizacion: numeroAutorizacion,
-        fecha_autorizacion: fechaAutorizacion,
-        estado: 'GENERADO',
-      });
-
-      await invoicePDF.save();
+      // Upsert, not insert: claveAcceso is unique, so regenerating a RIDE
+      // (the queue retries, and POST /invoice-pdf/regenerate) would otherwise
+      // throw E11000. Only the PDF fields are $set, so a row's email_estado
+      // and email_intentos survive a regeneration.
+      await InvoicePDF.findOneAndUpdate(
+        { claveAcceso: factura.clave_acceso },
+        {
+          $set: {
+            factura_id: factura._id,
+            pdf_url: uploadResult.url, // Key de S3 (proveedor s3) o URL pública (cloudinary/local) -- ver src/models/InvoicePDF.ts
+            pdf_public_id: uploadResult.publicId, // ID para eliminar/gestionar el archivo
+            pdf_provider: uploadResult.provider, // Proveedor usado (cloudinary, local, etc.)
+            tamano_archivo: uploadResult.size,
+            numero_autorizacion: numeroAutorizacion,
+            fecha_autorizacion: fechaAutorizacion,
+            estado: 'GENERADO',
+          },
+        },
+        { upsert: true, new: true },
+      );
       console.log(`✅ PDF guardado exitosamente: ${uploadResult.url}`);
     } catch (error) {
       console.error('❌ Error generating PDF:', error);
@@ -449,38 +510,6 @@ export class InvoiceService {
         console.error('❌ Error saving PDF error record:', dbError);
       }
     }
-  }
-
-  /**
-   * Programa consultas de autorización al SRI con reintentos.
-   * En el esquema offline la autorización es asíncrona: tras la recepción,
-   * el comprobante puede tardar unos segundos en ser autorizado.
-   * @param facturaId ID de la factura a consultar
-   * @param intento Número de intento actual
-   * @param maxIntentos Número máximo de intentos
-   * @param delayMs Espera entre intentos en milisegundos
-   */
-  static programarConsultaAutorizacion(facturaId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
-    const timer = setTimeout(async () => {
-      unregisterScheduledCheck(timer);
-      try {
-        const resultado = await InvoiceService.consultarAutorizacionSRI(facturaId);
-        const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
-
-        if (pendiente && intento < maxIntentos) {
-          InvoiceService.programarConsultaAutorizacion(facturaId, intento + 1, maxIntentos, delayMs);
-        }
-      } catch (error: any) {
-        console.error('Error en la consulta de autorización automática:', error.message);
-      }
-    }, delayMs);
-
-    // Do not keep the process alive because of the scheduled check. Also
-    // registered with scheduledCheck.utils so a test that forgets to mock
-    // this away can't leave a real timer pending into a later, unrelated
-    // test — see that module's doc comment.
-    timer.unref?.();
-    registerScheduledCheck(timer);
   }
 
   /**
@@ -513,6 +542,16 @@ export class InvoiceService {
 
       await factura.save();
       recordSriOutcome(factura.clave_acceso, factura.sri_estado);
+
+      // Enqueued only after the save above, so the worker cannot read the
+      // invoice back before its authorization data is persisted. The PDF job
+      // enqueues the email once the RIDE exists, and both are idempotent, so
+      // the reconciler driving an already-authorized comprobante through
+      // here again is harmless.
+      if (respuesta.estado === 'AUTORIZADO') {
+        await enqueuePdfGeneration('01', String(factura._id));
+      }
+
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);

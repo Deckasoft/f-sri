@@ -606,7 +606,8 @@ curl -X POST "$BASE_URL/api/v1/product" \
   -d '{
     "codigo": "P001",
     "descripcion": "Producto de Ejemplo",
-    "precio_unitario": 850.00
+    "precio_unitario": 850.00,
+    "tiene_iva": true
   }'
 ```
 

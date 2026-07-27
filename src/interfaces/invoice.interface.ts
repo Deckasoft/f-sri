@@ -1,3 +1,5 @@
+import type { EmissionSeriesValues } from '../models/emissionSeries';
+
 export interface ProductDetail {
   detalle: {
     codigoPrincipal: string;
@@ -44,6 +46,8 @@ export interface CreateInvoiceDTO {
   fechaEmision: Date;
   claveAcceso: string;
   secuencial: string;
+  /** Emission context the secuencial belongs to; see models/emissionSeries.ts. */
+  serie: EmissionSeriesValues;
   totalSinImpuestos: number;
   totalIva: number;
   totalConImpuestos: number;

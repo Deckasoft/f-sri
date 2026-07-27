@@ -3,6 +3,7 @@ import { z } from 'zod';
 import IssuingCompany from '../../models/IssuingCompany';
 import { isValidRUC } from '../../utils/validation.utils';
 import { getAdminUserId } from '../../utils/admin.utils';
+import { isDuplicateKeyError } from '../../utils/mongo.utils';
 
 // Admin-only tenant provisioning and management. Mounted at /admin/api/tenants,
 // behind adminAuth (see src/routes/admin/index.ts). Unlike
@@ -10,9 +11,6 @@ import { getAdminUserId } from '../../utils/admin.utils';
 // these routes operate on any tenant by :id, because only an admin caller can
 // reach them at all.
 const router = Router();
-
-const isDuplicateKeyError = (err: unknown): boolean =>
-  typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
 
 // Fields an admin may set about a tenant's business profile. Deliberately
 // excludes certificate/certificate_password (only ever arrive via the
@@ -29,8 +27,19 @@ const tenantProfileSchema = z.object({
   direccion_establecimiento: z.string().optional(),
   telefono: z.string().optional(),
   email: z.string().email().optional(),
-  codigo_establecimiento: z.string().optional(),
-  punto_emision: z.string().optional(),
+  // Exactly three digits, per the SRI: they concatenate into the 6-character
+  // serie of every clave de acceso this tenant emits. A bare z.string() let a
+  // customer's "punto de emisión 1" through as "1", producing a 4-character
+  // serie in a 49-digit key -- malformed, rejected by the SRI, and not
+  // obviously traceable back to this form field.
+  codigo_establecimiento: z
+    .string()
+    .regex(/^\d{3}$/, 'Debe ser exactamente 3 dígitos (p. ej. 001)')
+    .optional(),
+  punto_emision: z
+    .string()
+    .regex(/^\d{3}$/, 'Debe ser exactamente 3 dígitos (p. ej. 001)')
+    .optional(),
   tipo_ambiente: z.union([z.literal(1), z.literal(2)]).optional(),
   tipo_emision: z.literal(1).optional(),
   obligado_contabilidad: z.boolean().optional(),

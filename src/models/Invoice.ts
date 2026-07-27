@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from 'mongoose';
+import { applyEmissionSeriesIndex, emissionSeriesFields } from './emissionSeries';
 
 export interface IInvoice extends Document {
   empresa_emisora_id: Types.ObjectId;
@@ -6,6 +7,9 @@ export interface IInvoice extends Document {
   fecha_emision: Date;
   clave_acceso: string;
   secuencial: string;
+  tipo_ambiente: number;
+  codigo_establecimiento: string;
+  punto_emision: string;
   estado: string;
   total_sin_impuestos: number;
   total_iva: number;
@@ -28,6 +32,7 @@ const schema = new Schema<IInvoice>({
   fecha_emision: { type: Date, required: true },
   clave_acceso: { type: String, required: true },
   secuencial: { type: String, required: true },
+  ...emissionSeriesFields,
   estado: { type: String, required: true },
   total_sin_impuestos: { type: Number, required: true },
   total_iva: { type: Number, required: true },
@@ -43,5 +48,7 @@ const schema = new Schema<IInvoice>({
   sri_fecha_respuesta: { type: Date },
   datos_originales: { type: String },
 });
+
+applyEmissionSeriesIndex(schema);
 
 export default model<IInvoice>('Invoice', schema);

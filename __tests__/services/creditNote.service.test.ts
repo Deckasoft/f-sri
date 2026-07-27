@@ -1,3 +1,6 @@
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+import { enqueueAuthorizationCheck } from '../../src/queue/queues';
+
 // --- Mocks for collaborators ---
 const firmarXMLMock = jest.fn().mockResolvedValue('<notaCredito>firmada</notaCredito>');
 jest.mock('../../src/utils/firma.utils', () => ({
@@ -94,6 +97,14 @@ jest.mock('../../src/models/CreditNotePDF', () => {
       savedPDFs.push(this);
     }
     save = jest.fn().mockResolvedValue(this);
+    // The success path upserts by claveAcceso rather than constructing a
+    // document (claveAcceso is unique, so regenerating would throw E11000),
+    // so record that payload into savedPDFs too — the assertions read it.
+    static findOneAndUpdate = jest.fn((filter: any, update: any) => {
+      const doc = { ...filter, ...update.$set };
+      savedPDFs.push(doc);
+      return Promise.resolve(doc);
+    });
   }
   return { __esModule: true, default: MockPDF };
 });
@@ -209,11 +220,17 @@ describe('CreditNoteService', () => {
 
   describe('generarSecuencial', () => {
     it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
-      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
-      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
+      await expect(CreditNoteService.generarSecuencial(empresaMock)).resolves.toBe('000000001');
+      await expect(CreditNoteService.generarSecuencial(empresaMock)).resolves.toBe('000000002');
 
       expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
-        { empresa_emisora_id: COMPANY_ID, document_type: '04' },
+        {
+          empresa_emisora_id: COMPANY_ID,
+          tipo_ambiente: empresaMock.tipo_ambiente,
+          codigo_establecimiento: empresaMock.codigo_establecimiento,
+          punto_emision: empresaMock.punto_emision,
+          document_type: '04',
+        },
         { $inc: { current: 1 } },
         { upsert: true, new: true },
       );
@@ -321,7 +338,6 @@ describe('CreditNoteService', () => {
     it('signs with tipoDocumento 04, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
       verifyP12PasswordMock.mockResolvedValue({ valid: true });
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      const programarSpy = jest.spyOn(CreditNoteService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const doc = notaCreditoDoc();
 
       await CreditNoteService.procesarEnvioSRI(doc, empresaMock, clienteMock, [productoMock], requestValido);
@@ -329,9 +345,10 @@ describe('CreditNoteService', () => {
       expect(firmarXMLMock).toHaveBeenCalledWith('<notaCredito/>', '/tmp/cert.p12', 'test-cert-password', '04');
       expect(doc.xml_firmado).toBe('<notaCredito>firmada</notaCredito>');
       expect(doc.sri_estado).toBe('RECIBIDA');
-      expect(generateCreditNotePDFMock).toHaveBeenCalled();
-      expect(savedPDFs[0].estado).toBe('GENERADO');
-      expect(programarSpy).toHaveBeenCalledWith('cn-1');
+      // No RIDE on recepción — it is generated once the SRI authorizes the
+      // comprobante. See the invoice service test for the reasoning.
+      expect(generateCreditNotePDFMock).not.toHaveBeenCalled();
+      expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('04', 'cn-1');
     });
 
     it('records the DEVUELTA state without generating a PDF', async () => {
@@ -399,36 +416,6 @@ describe('CreditNoteService', () => {
       creditNoteStatics.findById.mockResolvedValue(null);
 
       await expect(CreditNoteService.consultarAutorizacionSRI('nope')).resolves.toBeNull();
-    });
-  });
-
-  describe('programarConsultaAutorizacion', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    it('retries while the receipt is pending, up to the max attempts', async () => {
-      const consultarSpy = jest
-        .spyOn(CreditNoteService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'EN PROCESO' } as any);
-
-      CreditNoteService.programarConsultaAutorizacion('cn-1', 1, 3, 1000);
-      await jest.advanceTimersByTimeAsync(1000);
-      await jest.advanceTimersByTimeAsync(1000);
-      await jest.advanceTimersByTimeAsync(1000);
-      await jest.advanceTimersByTimeAsync(1000);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(3);
-    });
-
-    it('stops retrying once the receipt is authorized', async () => {
-      const consultarSpy = jest
-        .spyOn(CreditNoteService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'AUTORIZADO' } as any);
-
-      CreditNoteService.programarConsultaAutorizacion('cn-1', 1, 3, 1000);
-      await jest.advanceTimersByTimeAsync(3000);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(1);
     });
   });
 

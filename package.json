@@ -21,7 +21,8 @@
     "validate": "npm run typecheck && npm run lint && npm run build && npm run test:ci",
     "format": "prettier --write \"src/**/*.ts\" \"__tests__/**/*.ts\"",
     "create-admin": "ts-node scripts/create-admin.ts",
-    "seed:identification-types": "ts-node scripts/seed-identification-types.ts"
+    "seed:identification-types": "ts-node scripts/seed-identification-types.ts",
+    "migrate:sequence-series": "ts-node scripts/migrate-sequence-series.ts"
   },
   "keywords": [
     "facturacion-electronica",
@@ -54,6 +55,7 @@
     "@xmldom/xmldom": "^0.8.10",
     "axios": "^1.12.0",
     "bcryptjs": "^2.4.3",
+    "bullmq": "^5.81.2",
     "cloudinary": "^2.5.1",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
@@ -61,6 +63,7 @@
     "express": "^4.18.2",
     "express-rate-limit": "^8.6.0",
     "helmet": "^8.3.0",
+    "ioredis": "^5.11.1",
     "jsbarcode": "^3.11.6",
     "jsonwebtoken": "^9.0.0",
     "mongoose": "^8.15.0",

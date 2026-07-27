@@ -36,6 +36,14 @@ export interface IInvoicePDF extends Document {
   email_intentos: number;
   email_ultimo_error?: string;
   email_enviado_por?: string; // ID del usuario que envió
+  /**
+   * true cuando el RIDE se envió al email_notificacion del emisor porque el
+   * cliente no tiene email. El envío es correcto, pero NO llegó al cliente:
+   * este flag existe para poder listar esas facturas
+   * (`db.invoicepdfs.find({ email_enviado_al_emisor: true })`) en vez de que
+   * la sustitución quede solo en una línea de log que se pierde.
+   */
+  email_enviado_al_emisor?: boolean;
 }
 
 const InvoicePDFSchema: Schema = new Schema({
@@ -43,8 +51,30 @@ const InvoicePDFSchema: Schema = new Schema({
   claveAcceso: { type: String, required: true, unique: true },
 
   // Campos actualizados para el nuevo sistema de almacenamiento
-  pdf_url: { type: String, required: true }, // Key de S3 o URL pública -- ver el comentario en IInvoicePDF arriba
-  pdf_public_id: { type: String, required: true }, // ID único en el proveedor
+  // Obligatorios solo cuando el RIDE se generó de verdad.
+  //
+  // Antes eran `required: true` a secas, y el camino de error del servicio
+  // guarda un registro con estado 'ERROR' y estas dos cadenas vacías. Es
+  // decir: el registro cuya única función es dejar constancia de que la
+  // generación falló era, él mismo, invalidable — Mongoose lo rechazaba con
+  // "InvoicePDF validation failed" y el fallo original desaparecía sin dejar
+  // rastro en la base de datos. Un fallo de PDF quedaba totalmente invisible
+  // salvo en los logs del contenedor.
+  //
+  // Los otros cuatro modelos de PDF nunca marcaron estos campos como
+  // requeridos, así que este defecto era exclusivo de las facturas.
+  pdf_url: {
+    type: String,
+    required: function (this: IInvoicePDF) {
+      return this.estado !== 'ERROR';
+    },
+  }, // Key de S3 o URL pública -- ver el comentario en IInvoicePDF arriba
+  pdf_public_id: {
+    type: String,
+    required: function (this: IInvoicePDF) {
+      return this.estado !== 'ERROR';
+    },
+  }, // ID único en el proveedor
   pdf_provider: { type: String, required: true, default: 'local' }, // Proveedor de almacenamiento
 
   fecha_generacion: { type: Date, default: Date.now },
@@ -65,6 +95,7 @@ const InvoicePDFSchema: Schema = new Schema({
   email_intentos: { type: Number, required: true, default: 0 },
   email_ultimo_error: { type: String },
   email_enviado_por: { type: String },
+  email_enviado_al_emisor: { type: Boolean, default: false },
 });
 
 // Índice para búsquedas rápidas por factura

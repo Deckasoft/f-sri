@@ -17,6 +17,7 @@ import helmet from 'helmet';
 import { getCorsConfig } from './config/cors.config';
 import { tenantLimiter } from './config/rateLimit.config';
 import swaggerSpec from './swagger';
+import { PDFStorageFactory } from './services/storage';
 import adminAuthRoutes from './routes/admin/auth';
 import adminRoutes from './routes/admin';
 import onboardingRoutes from './routes/onboarding';
@@ -169,6 +170,14 @@ app.use((err: Error, req: express.Request, res: express.Response, next: express.
 
 const PORT = process.env.PORT || 3000;
 const { MONGO_URI } = loadEnv();
+
+// Construct the storage provider once at startup so a misconfiguration is a
+// boot failure rather than a per-document surprise. Previously S3's config
+// was only validated lazily, inside the constructor, on the first upload --
+// which happens inside the PDF worker's try/catch, so bad config surfaced as
+// InvoicePDF rows with estado 'ERROR' that no API response ever mentioned.
+// This also warms the singleton the request path reuses.
+PDFStorageFactory.create();
 
 mongoose
   .connect(MONGO_URI)

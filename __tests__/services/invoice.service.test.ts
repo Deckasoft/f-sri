@@ -2,6 +2,8 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import forge from 'node-forge';
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+import { enqueueAuthorizationCheck } from '../../src/queue/queues';
 
 const firmarXMLMock = jest.fn().mockResolvedValue('<factura>firmada</factura>');
 jest.mock('../../src/utils/firma.utils', () => ({
@@ -82,6 +84,14 @@ jest.mock('../../src/models/InvoicePDF', () => {
       savedPDFs.push(this);
     }
     save = jest.fn().mockResolvedValue(this);
+    // The success path upserts by claveAcceso rather than constructing a
+    // document (claveAcceso is unique, so regenerating would throw E11000),
+    // so record that payload into savedPDFs too — the assertions read it.
+    static findOneAndUpdate = jest.fn((filter: any, update: any) => {
+      const doc = { ...filter, ...update.$set };
+      savedPDFs.push(doc);
+      return Promise.resolve(doc);
+    });
   }
   return { __esModule: true, default: MockPDF };
 });
@@ -241,14 +251,47 @@ describe('InvoiceService', () => {
 
   describe('generarSecuencial', () => {
     it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
-      await expect(InvoiceService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
-      await expect(InvoiceService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
+      const empresa = empresaBase();
+      await expect(InvoiceService.generarSecuencial(empresa as any)).resolves.toBe('000000001');
+      await expect(InvoiceService.generarSecuencial(empresa as any)).resolves.toBe('000000002');
 
       expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
-        { empresa_emisora_id: COMPANY_ID, document_type: '01' },
+        {
+          empresa_emisora_id: COMPANY_ID,
+          tipo_ambiente: 1,
+          codigo_establecimiento: '001',
+          punto_emision: '001',
+          document_type: '01',
+        },
         { $inc: { current: 1 } },
         { upsert: true, new: true },
       );
+    });
+
+    // The SRI treats pruebas and producción as disjoint numbering universes
+    // (the ambiente is its own digit of the clave de acceso), so promoting a
+    // tenant must not continue its test numbering into production.
+    it('keys the counter per ambiente, so pruebas and producción are separate series', async () => {
+      await InvoiceService.generarSecuencial({ ...empresaBase(), tipo_ambiente: 1 } as any);
+      await InvoiceService.generarSecuencial({ ...empresaBase(), tipo_ambiente: 2 } as any);
+
+      const [pruebasKey] = sequenceStatics.findOneAndUpdate.mock.calls[0];
+      const [produccionKey] = sequenceStatics.findOneAndUpdate.mock.calls[1];
+      expect(pruebasKey.tipo_ambiente).toBe(1);
+      expect(produccionKey.tipo_ambiente).toBe(2);
+      expect(pruebasKey).not.toEqual(produccionKey);
+    });
+
+    // Numbering runs per estab-ptoEmi, so moving a tenant to a new emission
+    // point must start a fresh series rather than continue the old one.
+    it('keys the counter per emission point', async () => {
+      await InvoiceService.generarSecuencial({ ...empresaBase(), punto_emision: '001' } as any);
+      await InvoiceService.generarSecuencial({ ...empresaBase(), punto_emision: '002' } as any);
+
+      const [first] = sequenceStatics.findOneAndUpdate.mock.calls[0];
+      const [second] = sequenceStatics.findOneAndUpdate.mock.calls[1];
+      expect(first.punto_emision).toBe('001');
+      expect(second.punto_emision).toBe('002');
     });
   });
 
@@ -396,9 +439,12 @@ describe('InvoiceService', () => {
       expect(withCompanyP12Mock).not.toHaveBeenCalled();
     });
 
-    it('signs with the real P12, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
+    // RECIBIDA means the SRI accepted the comprobante for processing, not
+    // that it authorized it — it can still be rejected. No RIDE is produced
+    // at this point, because there is no authorization date to print on it
+    // yet; that happens in consultarAutorizacionSRI.
+    it('signs with the real P12, sends and schedules authorization on RECIBIDA, without generating a PDF', async () => {
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
-      const programarSpy = jest.spyOn(InvoiceService, 'programarConsultaAutorizacion').mockImplementation(() => {});
       const factura: any = facturaDoc();
       const empresa = { ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD };
 
@@ -406,9 +452,10 @@ describe('InvoiceService', () => {
 
       expect(firmarXMLMock).toHaveBeenCalledWith('<factura/>', p12Path, P12_PASSWORD, '01');
       expect(factura.sri_estado).toBe('RECIBIDA');
-      expect(generateInvoicePDFMock).toHaveBeenCalled();
-      expect(savedPDFs[0].estado).toBe('GENERADO');
-      expect(programarSpy).toHaveBeenCalledWith('factura-1');
+      expect(generateInvoicePDFMock).not.toHaveBeenCalled();
+      // The authorization poll is now a queued job rather than an in-process
+      // timer; the queue module is mocked suite-wide in __tests__/setup.ts.
+      expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('01', 'factura-1');
     });
 
     it('records the DEVUELTA state without generating a PDF', async () => {
@@ -451,22 +498,6 @@ describe('InvoiceService', () => {
       invoiceStatics.findById.mockResolvedValue(null);
 
       await expect(InvoiceService.consultarAutorizacionSRI('nope')).resolves.toBeNull();
-    });
-  });
-
-  describe('programarConsultaAutorizacion', () => {
-    beforeEach(() => jest.useFakeTimers());
-    afterEach(() => jest.useRealTimers());
-
-    it('retries while pending, up to the max attempts', async () => {
-      const consultarSpy = jest
-        .spyOn(InvoiceService, 'consultarAutorizacionSRI')
-        .mockResolvedValue({ estado: 'EN PROCESO' } as any);
-
-      InvoiceService.programarConsultaAutorizacion('factura-1', 1, 3, 500);
-      await jest.advanceTimersByTimeAsync(2500);
-
-      expect(consultarSpy).toHaveBeenCalledTimes(3);
     });
   });
 

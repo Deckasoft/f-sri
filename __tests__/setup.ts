@@ -1,6 +1,25 @@
 import crypto from 'crypto';
-import { clearAllScheduledAuthorizationChecks } from '../src/utils/scheduledCheck.utils';
 import { flushAllBackgroundWork } from '../src/utils/backgroundWork.utils';
+
+// Every document service enqueues an authorization check after a successful
+// recepción. Mocking the queue module suite-wide keeps that from opening a
+// real Redis connection in tests: there is no Redis here, and BullMQ's
+// blocking client would hang the run rather than fail fast. Tests that care
+// can still assert on enqueueAuthorizationCheck, since it is a jest.fn().
+//
+// This replaces the old clearAllScheduledAuthorizationChecks() afterEach —
+// the in-memory setTimeout it cancelled no longer exists.
+jest.mock('../src/queue/queues', () => ({
+  __esModule: true,
+  AUTHORIZATION_QUEUE: 'sri-authorization',
+  authorizationJobId: (documentType: string, documentId: string) => `${documentType}-${documentId}`,
+  PDF_QUEUE: 'sri-pdf',
+  EMAIL_QUEUE: 'sri-email',
+  enqueueAuthorizationCheck: jest.fn().mockResolvedValue(undefined),
+  enqueuePdfGeneration: jest.fn().mockResolvedValue(undefined),
+  enqueueInvoiceEmail: jest.fn().mockResolvedValue(undefined),
+  closeQueues: jest.fn().mockResolvedValue(undefined),
+}));
 
 // Global test setup
 jest.setTimeout(30000);
@@ -12,6 +31,10 @@ process.env.JWT_SECRET = 'test_jwt_secret_key_for_testing';
 process.env.ENCRYPTION_KEY = crypto.randomBytes(32).toString('hex');
 process.env.MONGO_URI = 'mongodb://localhost:27017/veronica_test';
 process.env.PUBLIC_URL = 'http://localhost:3000';
+// loadEnv() requires this. Nothing in the suite connects to it — the queue
+// module is mocked just below — but the value has to be present or every
+// test that builds the app fails at startup validation.
+process.env.REDIS_URL = 'redis://localhost:6379';
 
 // Global mocks for CI environment
 if (process.env.CI) {
@@ -67,14 +90,6 @@ afterEach(async () => {
   // unrelated test's beforeEach has already reconfigured — corrupting that
   // test's call counts/arguments instead of its own.
   await flushAllBackgroundWork();
-
-  // Cancel any real setTimeout a test's exercise of
-  // programarConsultaAutorizacion (invoice/credit-note/debit-note/
-  // delivery-note/withholding services) may have left pending — see
-  // src/utils/scheduledCheck.utils.ts. Otherwise a real ~5s timer a test
-  // forgot to mock away can fire during a LATER, unrelated test still
-  // running in the same Jest worker, intermittently flaking the suite.
-  clearAllScheduledAuthorizationChecks();
 
   // Clear all mocks after each test
   jest.clearAllMocks();

@@ -7,8 +7,9 @@ import { generateDeliveryNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
-import { getNextSecuencial } from '../utils/sequence.utils';
-import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
+import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
+import { emissionSeriesOf } from '../models/emissionSeries';
+import { enqueueAuthorizationCheck, enqueuePdfGeneration } from '../queue/queues';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import DeliveryNote from '../models/DeliveryNote';
@@ -39,8 +40,8 @@ export class DeliveryNoteService {
    * Genera el siguiente secuencial de guía de remisión para una empresa
    * (codDoc '06'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(companyId: string): Promise<string> {
-    return getNextSecuencial(companyId, '06');
+  static async generarSecuencial(empresa: EmissionPoint): Promise<string> {
+    return getNextSecuencial(empresa, '06');
   }
 
   /**
@@ -53,7 +54,7 @@ export class DeliveryNoteService {
 
     const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(companyId);
+    const secuencial = await this.generarSecuencial(empresa);
     const fechaEmision = convertirFecha(datos.infoGuiaRemision.fechaEmision);
     const fechaIniTransporte = convertirFecha(datos.infoGuiaRemision.fechaIniTransporte);
     const fechaFinTransporte = convertirFecha(datos.infoGuiaRemision.fechaFinTransporte);
@@ -101,6 +102,7 @@ export class DeliveryNoteService {
       fecha_emision: fechaEmision,
       clave_acceso: claveAcceso,
       secuencial,
+      ...emissionSeriesOf(empresa),
       estado: 'CREADA',
       dir_partida: datos.infoGuiaRemision.dirPartida,
       razon_social_transportista: datos.infoGuiaRemision.razonSocialTransportista,
@@ -183,8 +185,9 @@ export class DeliveryNoteService {
           console.log(
             `✅ GUÍA DE REMISIÓN RECIBIDA POR SRI - ID: ${guiaRemision._id}, Clave: ${guiaRemision.clave_acceso}, Secuencial: ${guiaRemision.secuencial}`,
           );
-          await this.generarPDFGuiaRemision(guiaRemision, empresa, datos);
-          this.programarConsultaAutorizacion(String(guiaRemision._id));
+          // No PDF here — the RIDE is generated on AUTORIZADO, not on
+          // recepción. See the note in InvoiceService.procesarEnvioSRI.
+          await enqueueAuthorizationCheck('06', String(guiaRemision._id));
         } else {
           console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Guía de remisión ID: ${guiaRemision._id}`);
         }
@@ -202,32 +205,6 @@ export class DeliveryNoteService {
       await guiaRemision.save();
       recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
     }
-  }
-
-  /**
-   * Programa consultas de autorización al SRI con reintentos
-   */
-  static programarConsultaAutorizacion(guiaRemisionId: string, intento = 1, maxIntentos = 3, delayMs = 5000): void {
-    const timer = setTimeout(async () => {
-      unregisterScheduledCheck(timer);
-      try {
-        const resultado = await DeliveryNoteService.consultarAutorizacionSRI(guiaRemisionId);
-        const pendiente = !resultado || (resultado.estado !== 'AUTORIZADO' && resultado.estado !== 'NO AUTORIZADO');
-
-        if (pendiente && intento < maxIntentos) {
-          DeliveryNoteService.programarConsultaAutorizacion(guiaRemisionId, intento + 1, maxIntentos, delayMs);
-        }
-      } catch (error: any) {
-        console.error('Error en la consulta de autorización automática:', error.message);
-      }
-    }, delayMs);
-
-    // Do not keep the process alive because of the scheduled check. Also
-    // registered with scheduledCheck.utils so a test that forgets to mock
-    // this away can't leave a real timer pending into a later, unrelated
-    // test — see that module's doc comment.
-    timer.unref?.();
-    registerScheduledCheck(timer);
   }
 
   /**
@@ -260,6 +237,11 @@ export class DeliveryNoteService {
 
       await guiaRemision.save();
       recordSriOutcome(guiaRemision.clave_acceso, guiaRemision.sri_estado);
+
+      if (respuesta.estado === 'AUTORIZADO') {
+        await enqueuePdfGeneration('06', String(guiaRemision._id));
+      }
+
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);
@@ -270,10 +252,40 @@ export class DeliveryNoteService {
   /**
    * Genera y almacena el PDF (RIDE) de una guía de remisión recibida por el SRI
    */
+  /**
+   * Rebuilds the RIDE inputs from persisted state, given only an id — the
+   * PDF worker receives nothing else. See InvoiceService.generarPDFDesdeId.
+   */
+  static async generarPDFDesdeId(guiaRemisionId: string): Promise<void> {
+    const guiaRemision = await DeliveryNote.findById(guiaRemisionId);
+    if (!guiaRemision) {
+      throw new Error(`Guía de remisión ${guiaRemisionId} no encontrada`);
+    }
+    if (!guiaRemision.datos_originales) {
+      throw new Error(`Guía de remisión ${guiaRemisionId} no tiene datos_originales: no se puede regenerar el RIDE`);
+    }
+
+    const empresa = await InvoiceService.buscarIssuingCompany(String(guiaRemision.empresa_emisora_id));
+    if (!empresa) {
+      throw new Error(`La empresa emisora de la guía de remisión ${guiaRemisionId} ya no existe`);
+    }
+
+    const datos: DeliveryNoteRequest = JSON.parse(guiaRemision.datos_originales);
+
+    await this.generarPDFGuiaRemision(guiaRemision, empresa, datos);
+  }
+
   static async generarPDFGuiaRemision(guiaRemision: any, empresa: any, datos: DeliveryNoteRequest): Promise<void> {
     try {
-      const numeroAutorizacion = guiaRemision.clave_acceso;
-      const fechaAutorizacion = guiaRemision.sri_fecha_respuesta || new Date();
+      // See generarPDFFactura: the RIDE must carry the SRI's real
+      // authorization date, so it cannot be produced before one exists.
+      if (!guiaRemision.fecha_autorizacion) {
+        throw new Error(
+          `No se puede generar el RIDE de la guía de remisión ${guiaRemision.secuencial}: todavía no tiene fecha de autorización del SRI`,
+        );
+      }
+      const numeroAutorizacion = guiaRemision.autorizacion_numero || guiaRemision.clave_acceso;
+      const fechaAutorizacion = guiaRemision.fecha_autorizacion;
 
       const pdfBuffer = await generateDeliveryNotePDF({
         guiaRemision: datos,
@@ -289,19 +301,24 @@ export class DeliveryNoteService {
       const filename = `guia_remision_${guiaRemision.secuencial}_${guiaRemision.clave_acceso}`;
       const uploadResult = await storage.upload(pdfBuffer, filename);
 
-      const deliveryNotePDF = new DeliveryNotePDF({
-        guia_remision_id: guiaRemision._id,
-        claveAcceso: guiaRemision.clave_acceso,
-        pdf_url: uploadResult.url,
-        pdf_public_id: uploadResult.publicId,
-        pdf_provider: uploadResult.provider,
-        tamano_archivo: uploadResult.size,
-        numero_autorizacion: numeroAutorizacion,
-        fecha_autorizacion: fechaAutorizacion,
-        estado: 'GENERADO',
-      });
-
-      await deliveryNotePDF.save();
+      // Upsert, not insert: claveAcceso is unique, so a regeneration would
+      // otherwise throw E11000.
+      await DeliveryNotePDF.findOneAndUpdate(
+        { claveAcceso: guiaRemision.clave_acceso },
+        {
+          $set: {
+            guia_remision_id: guiaRemision._id,
+            pdf_url: uploadResult.url,
+            pdf_public_id: uploadResult.publicId,
+            pdf_provider: uploadResult.provider,
+            tamano_archivo: uploadResult.size,
+            numero_autorizacion: numeroAutorizacion,
+            fecha_autorizacion: fechaAutorizacion,
+            estado: 'GENERADO',
+          },
+        },
+        { upsert: true, new: true },
+      );
       console.log(`✅ PDF de guía de remisión guardado: ${uploadResult.url}`);
     } catch (error) {
       console.error('❌ Error generating delivery note PDF:', error);

@@ -32,6 +32,19 @@ export const newTenantSchema = z.object({
   ruc: z.string().regex(/^\d{10}001$/, 'RUC inválido: debe tener 13 dígitos y terminar en 001'),
   razon_social: z.string().min(1, 'Requerido'),
   nombre_comercial: z.string().min(1, 'Requerido'),
+  // Set at creation rather than falling back to the model defaults
+  // (001/001/pruebas): these two concatenate into the 6-character serie of
+  // every clave de acceso the tenant emits, and together with the ambiente
+  // they identify the numbering series its counters belong to.
+  codigo_establecimiento: z
+    .string()
+    .regex(/^\d{3}$/, 'Exactamente 3 dígitos')
+    .optional(),
+  punto_emision: z
+    .string()
+    .regex(/^\d{3}$/, 'Exactamente 3 dígitos')
+    .optional(),
+  tipo_ambiente: z.union([z.literal(1), z.literal(2)]).optional(),
 });
 export type NewTenantInput = z.infer<typeof newTenantSchema>;
 
@@ -159,3 +172,48 @@ export const onboardingCompleteResponseSchema = z.object({
   }),
 });
 export type OnboardingCompleteResponse = z.infer<typeof onboardingCompleteResponseSchema>;
+
+// Mirrors src/routes/admin/sequence.ts.
+//
+// `ultimo_secuencial` is the LAST number emitted, never the next one: the
+// counter starts at 0 and is incremented before being read, so 47 here means
+// the next document is 000000048. The UI must label it as "último" for the
+// same reason — an operator who reads it as "próximo" and types the number
+// their customer last used would make that tenant skip one on day one.
+const emissionSeriesSchema = z.object({
+  tipo_ambiente: z.number(),
+  codigo_establecimiento: z.string(),
+  punto_emision: z.string(),
+});
+export type EmissionSeries = z.infer<typeof emissionSeriesSchema>;
+
+export const tenantSequencesSchema = z.object({
+  serie: emissionSeriesSchema,
+  secuenciales: z.array(
+    z.object({
+      document_type: z.string(),
+      label: z.string(),
+      ultimo_secuencial: z.number(),
+      existe: z.boolean(),
+    }),
+  ),
+  // Counters for series the tenant is no longer emitting into — typically
+  // its pruebas numbering after promotion to producción. Shown read-only so
+  // a fresh production series is not mistaken for lost data.
+  otras_series: z.array(
+    emissionSeriesSchema.extend({
+      document_type: z.string(),
+      ultimo_secuencial: z.number(),
+    }),
+  ),
+});
+export type TenantSequences = z.infer<typeof tenantSequencesSchema>;
+
+export const sequenceSeedResultSchema = z.object({
+  serie: emissionSeriesSchema,
+  document_type: z.string(),
+  ultimo_secuencial: z.number(),
+  proximo_secuencial: z.string(),
+  actualizado: z.boolean(),
+});
+export type SequenceSeedResult = z.infer<typeof sequenceSeedResultSchema>;

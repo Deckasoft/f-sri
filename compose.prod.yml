@@ -56,6 +56,48 @@ services:
     # and observed usage (`docker stats`).
     mem_limit: 768m
     mem_reservation: 256m
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  # Same image as the api, different command. The SRI authorization poll runs
+  # here rather than in the web process: it used to be an unref()'d setTimeout
+  # inside the api, so a deploy or a crash silently dropped every comprobante
+  # still awaiting authorization, with nothing to pick them up again.
+  worker:
+    image: ${GHCR_IMAGE:-ghcr.io/deckasoft/f-sri:latest}
+    restart: always
+    command: ['node', 'dist/worker.js']
+    env_file:
+      - .env.production
+    depends_on:
+      redis:
+        condition: service_healthy
+    # No healthcheck: the worker binds no port. Its liveness shows up as jobs
+    # draining; a dead worker leaves comprobantes in PENDIENTE, which the
+    # reconciler re-enqueues as soon as one is running again.
+    # Same ceiling as the api, and for the same reason: the RIDE is rendered
+    # by a headless Chromium, which moved into this process. 512m was not
+    # enough -- Chromium died on launch under real job load.
+    mem_limit: 768m
+    mem_reservation: 256m
+
+  # Job store only. Everything in here is derivable from MongoDB — the
+  # reconciler (src/queue/reconciler.ts) re-enqueues anything still awaiting
+  # authorization — so this deliberately has NO volume: losing it costs at
+  # most one sweep interval, not data.
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: ['redis-server', '--appendonly', 'no', '--save', '']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    mem_limit: 256m
+    mem_reservation: 64m
 
   caddy:
     image: caddy:2-alpine

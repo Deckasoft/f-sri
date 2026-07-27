@@ -42,12 +42,15 @@ graph LR
 2. **📄 XML**: Se genera el XML según normativa del SRI
 3. **🔐 Firma**: Se firma digitalmente con el certificado almacenado (base64)
 4. **📤 Envío**: Se envía al SRI (ambiente pruebas o producción)
-5. **✅ Confirmación**: Si SRI responde `"RECIBIDA"`, se ejecuta automáticamente:
-   - **📄 Generación de PDF** con formato oficial
+5. **📨 Recepción**: Si el SRI responde `"RECIBIDA"`, el comprobante queda aceptado _para procesamiento_ — todavía no autorizado, y aún puede ser rechazado. Se encola una consulta de autorización.
+   - **📊 Log**: `✅ FACTURA RECIBIDA POR SRI - ID: [id], Clave: [clave], Secuencial: [seq]`
+6. **✅ Autorización**: Cuando el SRI responde `"AUTORIZADO"`, y solo entonces, se ejecuta automáticamente:
+   - **📄 Generación del RIDE** con el número y la **fecha de autorización reales** del SRI
    - **☁️ Almacenamiento** en el proveedor configurado (S3 recomendado en producción; Local/Cloudinary como alternativas)
-   - **📊 Log de éxito**: `✅ FACTURA RECIBIDA POR SRI - ID: [id], Clave: [clave], Secuencial: [seq]`
-   - **📧 Email** (si está configurado) con el PDF adjunto, vía Resend
-6. **📥 Disponibilidad**: PDF disponible via API, servido mediante una URL de descarga (presignada en S3)
+   - **📧 Email** al cliente con el PDF adjunto, vía Resend (si `RESEND_API_KEY` y `EMAIL_FROM` están configurados)
+7. **📥 Disponibilidad**: PDF disponible via API, servido mediante una URL de descarga (presignada en S3)
+
+> El RIDE se genera en la autorización y no en la recepción a propósito: antes de estar autorizado no existe una fecha de autorización que imprimir, y un comprobante recibido todavía puede ser rechazado. Los pasos 6 y 7 los ejecuta el proceso `worker` a través de la cola (BullMQ + Redis), no la petición HTTP.
 
 ## 🛠️ Tecnologías
 

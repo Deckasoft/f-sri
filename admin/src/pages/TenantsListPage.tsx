@@ -5,11 +5,14 @@ import { ApiError } from '../api/client';
 import type { Tenant } from '../api/types';
 import { useAuth } from '../context/useAuth';
 import {
+  TESTID_NEW_TENANT_CODIGO_ESTABLECIMIENTO,
   TESTID_NEW_TENANT_FORM,
   TESTID_NEW_TENANT_NOMBRE_COMERCIAL,
+  TESTID_NEW_TENANT_PUNTO_EMISION,
   TESTID_NEW_TENANT_RAZON_SOCIAL,
   TESTID_NEW_TENANT_RUC,
   TESTID_NEW_TENANT_SUBMIT,
+  TESTID_NEW_TENANT_TIPO_AMBIENTE,
   TESTID_TENANTS_TABLE,
 } from '../testIds';
 
@@ -24,6 +27,13 @@ export const TenantsListPage = () => {
   const [ruc, setRuc] = useState('');
   const [razonSocial, setRazonSocial] = useState('');
   const [nombreComercial, setNombreComercial] = useState('');
+  // Collected at creation rather than left to the model defaults: together
+  // these decide the numbering series every comprobante lands in, and a
+  // tenant created with the wrong emission point has to be corrected before
+  // it emits anything, not after.
+  const [codigoEstablecimiento, setCodigoEstablecimiento] = useState('001');
+  const [puntoEmision, setPuntoEmision] = useState('001');
+  const [tipoAmbiente, setTipoAmbiente] = useState<1 | 2>(1);
   const [createError, setCreateError] = useState<string | null>(null);
   const [creating, setCreating] = useState(false);
 
@@ -46,11 +56,21 @@ export const TenantsListPage = () => {
     setCreateError(null);
     setCreating(true);
 
-    createTenant(token, { ruc, razon_social: razonSocial, nombre_comercial: nombreComercial })
+    createTenant(token, {
+      ruc,
+      razon_social: razonSocial,
+      nombre_comercial: nombreComercial,
+      codigo_establecimiento: codigoEstablecimiento,
+      punto_emision: puntoEmision,
+      tipo_ambiente: tipoAmbiente,
+    })
       .then(() => {
         setRuc('');
         setRazonSocial('');
         setNombreComercial('');
+        setCodigoEstablecimiento('001');
+        setPuntoEmision('001');
+        setTipoAmbiente(1);
         loadTenants();
       })
       .catch((err: unknown) =>
@@ -95,6 +115,42 @@ export const TenantsListPage = () => {
             onChange={(event) => setNombreComercial(event.target.value)}
             data-testid={TESTID_NEW_TENANT_NOMBRE_COMERCIAL}
           />
+          <label htmlFor="codigo_establecimiento">Código establecimiento</label>
+          <input
+            id="codigo_establecimiento"
+            required
+            inputMode="numeric"
+            pattern="\d{3}"
+            title="Exactamente 3 dígitos, p. ej. 001"
+            value={codigoEstablecimiento}
+            onChange={(event) => setCodigoEstablecimiento(event.target.value)}
+            data-testid={TESTID_NEW_TENANT_CODIGO_ESTABLECIMIENTO}
+          />
+          <label htmlFor="punto_emision">Punto de emisión</label>
+          <input
+            id="punto_emision"
+            required
+            inputMode="numeric"
+            pattern="\d{3}"
+            title="Exactamente 3 dígitos, p. ej. 001"
+            value={puntoEmision}
+            onChange={(event) => setPuntoEmision(event.target.value)}
+            data-testid={TESTID_NEW_TENANT_PUNTO_EMISION}
+          />
+          <label htmlFor="tipo_ambiente">Ambiente</label>
+          <select
+            id="tipo_ambiente"
+            value={tipoAmbiente}
+            onChange={(event) => setTipoAmbiente(event.target.value === '2' ? 2 : 1)}
+            data-testid={TESTID_NEW_TENANT_TIPO_AMBIENTE}
+          >
+            <option value={1}>Pruebas</option>
+            <option value={2}>Producción</option>
+          </select>
+          <p className="hint-text">
+            Tras crear el tenant, configura sus secuenciales en la ficha antes de emitir: si el
+            cliente venía de otro sistema, su numeración no empieza en cero.
+          </p>
           {createError && <p className="error-text">{createError}</p>}
           <button type="submit" disabled={creating} data-testid={TESTID_NEW_TENANT_SUBMIT}>
             {creating ? 'Creando…' : 'Crear tenant'}

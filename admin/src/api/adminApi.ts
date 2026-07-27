@@ -6,7 +6,9 @@ import {
   inviteCreatedSchema,
   inviteSchema,
   loginResponseSchema,
+  sequenceSeedResultSchema,
   tenantSchema,
+  tenantSequencesSchema,
   usageRowSchema,
   usageSummaryRowSchema,
   type ApiKeyCreated,
@@ -15,8 +17,10 @@ import {
   type InviteItem,
   type LoginResponse,
   type NewTenantInput,
+  type SequenceSeedResult,
   type Tenant,
   type TenantProfileInput,
+  type TenantSequences,
   type UsageRow,
   type UsageSummaryRow,
 } from './types';
@@ -105,6 +109,29 @@ export const deleteInvite = (
   apiRequest(`/admin/api/tenants/${tenantId}/invites/${inviteId}`, okMessageSchema, {
     method: 'DELETE',
     headers: withBearerToken(token),
+  });
+
+export const getTenantSequences = (token: string, tenantId: string): Promise<TenantSequences> =>
+  apiRequest(`/admin/api/tenants/${tenantId}/sequences`, tenantSequencesSchema, {
+    headers: withBearerToken(token),
+  });
+
+/**
+ * `ultimoSecuencial` is the LAST number the tenant emitted, so the next
+ * document will be that plus one. The endpoint refuses to lower a counter
+ * (409): lowering is the only change that guarantees duplicate claves de
+ * acceso, which the SRI rejects.
+ */
+export const seedTenantSequence = (
+  token: string,
+  tenantId: string,
+  documentType: string,
+  ultimoSecuencial: number,
+): Promise<SequenceSeedResult> =>
+  apiRequest(`/admin/api/tenants/${tenantId}/sequences/${documentType}`, sequenceSeedResultSchema, {
+    method: 'PUT',
+    headers: withBearerToken(token),
+    body: JSON.stringify({ ultimo_secuencial: ultimoSecuencial }),
   });
 
 export const getTenantUsage = (token: string, tenantId: string): Promise<UsageRow[]> =>

@@ -95,7 +95,7 @@ export function generateInvoiceEmailTemplate(
 
         <div class="footer">
           <p>Este es un mensaje automático. Por favor, no responda a este correo.</p>
-          <p>Factura generada por Veronica-EC - Sistema de Facturación Electrónica Libre</p>
+          <p>Factura generada por Deckasoft - Sistema de Facturación Electrónica</p>
         </div>
       </div>
     </body>
@@ -122,7 +122,7 @@ export function generateInvoiceEmailTemplate(
     Si tiene alguna consulta sobre esta factura, no dude en contactarnos.
 
     Este es un mensaje automático. Por favor, no responda a este correo.
-    Factura generada por Veronica-EC - Sistema de Facturación Electrónica Libre
+    Factura generada por Deckasoft - Sistema de Facturación Electrónica
   `;
 
   return { subject, html, text };
