@@ -3,6 +3,7 @@ import { z } from 'zod';
 import IssuingCompany from '../../models/IssuingCompany';
 import { isValidRUC } from '../../utils/validation.utils';
 import { getAdminUserId } from '../../utils/admin.utils';
+import { isDuplicateKeyError } from '../../utils/mongo.utils';
 
 // Admin-only tenant provisioning and management. Mounted at /admin/api/tenants,
 // behind adminAuth (see src/routes/admin/index.ts). Unlike
@@ -10,9 +11,6 @@ import { getAdminUserId } from '../../utils/admin.utils';
 // these routes operate on any tenant by :id, because only an admin caller can
 // reach them at all.
 const router = Router();
-
-const isDuplicateKeyError = (err: unknown): boolean =>
-  typeof err === 'object' && err !== null && 'code' in err && err.code === 11000;
 
 // Fields an admin may set about a tenant's business profile. Deliberately
 // excludes certificate/certificate_password (only ever arrive via the
