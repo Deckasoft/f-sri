@@ -6,7 +6,7 @@ import { enviarComprobanteSRI, autorizarComprobanteSRI, RespuestaSRI, Autorizaci
 import { generateInvoicePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
-import { getNextSecuencial } from '../utils/sequence.utils';
+import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
@@ -37,8 +37,8 @@ export class InvoiceService {
    * sumar 1", que podía asignar el mismo secuencial dos veces bajo peticiones
    * concurrentes para el mismo tenant.
    */
-  static async generarSecuencial(companyId: string): Promise<string> {
-    return getNextSecuencial(companyId, '01');
+  static async generarSecuencial(empresa: EmissionPoint): Promise<string> {
+    return getNextSecuencial(empresa, '01');
   }
 
   /**
@@ -193,7 +193,7 @@ export class InvoiceService {
     }
 
     const productos = await this.buscarProducts(datosFactura.detalles, companyId);
-    const secuencial = await this.generarSecuencial(companyId);
+    const secuencial = await this.generarSecuencial(empresa);
     const fechaEmision = convertirFecha(datosFactura.infoFactura.fechaEmision);
 
     if (isNaN(fechaEmision.getTime())) {

@@ -7,7 +7,7 @@ import { generateWithholdingPDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
-import { getNextSecuencial } from '../utils/sequence.utils';
+import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
@@ -48,8 +48,8 @@ export class WithholdingService {
    * Genera el siguiente secuencial de comprobante de retención para una
    * empresa (codDoc '07'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(companyId: string): Promise<string> {
-    return getNextSecuencial(companyId, '07');
+  static async generarSecuencial(empresa: EmissionPoint): Promise<string> {
+    return getNextSecuencial(empresa, '07');
   }
 
   /**
@@ -62,7 +62,7 @@ export class WithholdingService {
 
     const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(companyId);
+    const secuencial = await this.generarSecuencial(empresa);
     const fechaEmision = convertirFecha(datos.infoCompRetencion.fechaEmision);
 
     if (isNaN(fechaEmision.getTime())) {

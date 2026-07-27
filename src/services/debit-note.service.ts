@@ -7,7 +7,7 @@ import { generateDebitNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
-import { getNextSecuencial } from '../utils/sequence.utils';
+import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
@@ -41,8 +41,8 @@ export class DebitNoteService {
    * Genera el siguiente secuencial de nota de débito para una empresa
    * (codDoc '05'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(companyId: string): Promise<string> {
-    return getNextSecuencial(companyId, '05');
+  static async generarSecuencial(empresa: EmissionPoint): Promise<string> {
+    return getNextSecuencial(empresa, '05');
   }
 
   /**
@@ -65,7 +65,7 @@ export class DebitNoteService {
       throw new Error('Client not found');
     }
 
-    const secuencial = await this.generarSecuencial(companyId);
+    const secuencial = await this.generarSecuencial(empresa);
     const fechaEmision = convertirFecha(datos.infoNotaDebito.fechaEmision);
     const fechaEmisionDocSustento = convertirFecha(datos.infoNotaDebito.fechaEmisionDocSustento);
 

@@ -7,7 +7,7 @@ import { generateDeliveryNotePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
-import { getNextSecuencial } from '../utils/sequence.utils';
+import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
@@ -39,8 +39,8 @@ export class DeliveryNoteService {
    * Genera el siguiente secuencial de guía de remisión para una empresa
    * (codDoc '06'), vía el contador atómico compartido.
    */
-  static async generarSecuencial(companyId: string): Promise<string> {
-    return getNextSecuencial(companyId, '06');
+  static async generarSecuencial(empresa: EmissionPoint): Promise<string> {
+    return getNextSecuencial(empresa, '06');
   }
 
   /**
@@ -53,7 +53,7 @@ export class DeliveryNoteService {
 
     const empresa = await InvoiceService.resolveEmpresaAutenticada(datos.infoTributaria.ruc, companyId);
 
-    const secuencial = await this.generarSecuencial(companyId);
+    const secuencial = await this.generarSecuencial(empresa);
     const fechaEmision = convertirFecha(datos.infoGuiaRemision.fechaEmision);
     const fechaIniTransporte = convertirFecha(datos.infoGuiaRemision.fechaIniTransporte);
     const fechaFinTransporte = convertirFecha(datos.infoGuiaRemision.fechaFinTransporte);

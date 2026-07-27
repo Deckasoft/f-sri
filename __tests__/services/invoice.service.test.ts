@@ -241,14 +241,47 @@ describe('InvoiceService', () => {
 
   describe('generarSecuencial', () => {
     it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
-      await expect(InvoiceService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
-      await expect(InvoiceService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
+      const empresa = empresaBase();
+      await expect(InvoiceService.generarSecuencial(empresa as any)).resolves.toBe('000000001');
+      await expect(InvoiceService.generarSecuencial(empresa as any)).resolves.toBe('000000002');
 
       expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
-        { empresa_emisora_id: COMPANY_ID, document_type: '01' },
+        {
+          empresa_emisora_id: COMPANY_ID,
+          tipo_ambiente: 1,
+          codigo_establecimiento: '001',
+          punto_emision: '001',
+          document_type: '01',
+        },
         { $inc: { current: 1 } },
         { upsert: true, new: true },
       );
+    });
+
+    // The SRI treats pruebas and producción as disjoint numbering universes
+    // (the ambiente is its own digit of the clave de acceso), so promoting a
+    // tenant must not continue its test numbering into production.
+    it('keys the counter per ambiente, so pruebas and producción are separate series', async () => {
+      await InvoiceService.generarSecuencial({ ...empresaBase(), tipo_ambiente: 1 } as any);
+      await InvoiceService.generarSecuencial({ ...empresaBase(), tipo_ambiente: 2 } as any);
+
+      const [pruebasKey] = sequenceStatics.findOneAndUpdate.mock.calls[0];
+      const [produccionKey] = sequenceStatics.findOneAndUpdate.mock.calls[1];
+      expect(pruebasKey.tipo_ambiente).toBe(1);
+      expect(produccionKey.tipo_ambiente).toBe(2);
+      expect(pruebasKey).not.toEqual(produccionKey);
+    });
+
+    // Numbering runs per estab-ptoEmi, so moving a tenant to a new emission
+    // point must start a fresh series rather than continue the old one.
+    it('keys the counter per emission point', async () => {
+      await InvoiceService.generarSecuencial({ ...empresaBase(), punto_emision: '001' } as any);
+      await InvoiceService.generarSecuencial({ ...empresaBase(), punto_emision: '002' } as any);
+
+      const [first] = sequenceStatics.findOneAndUpdate.mock.calls[0];
+      const [second] = sequenceStatics.findOneAndUpdate.mock.calls[1];
+      expect(first.punto_emision).toBe('001');
+      expect(second.punto_emision).toBe('002');
     });
   });
 

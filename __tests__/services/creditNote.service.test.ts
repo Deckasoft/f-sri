@@ -209,11 +209,17 @@ describe('CreditNoteService', () => {
 
   describe('generarSecuencial', () => {
     it('starts at 000000001 and increments on each call, atomically via Sequence', async () => {
-      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000001');
-      await expect(CreditNoteService.generarSecuencial(COMPANY_ID)).resolves.toBe('000000002');
+      await expect(CreditNoteService.generarSecuencial(empresaMock)).resolves.toBe('000000001');
+      await expect(CreditNoteService.generarSecuencial(empresaMock)).resolves.toBe('000000002');
 
       expect(sequenceStatics.findOneAndUpdate).toHaveBeenCalledWith(
-        { empresa_emisora_id: COMPANY_ID, document_type: '04' },
+        {
+          empresa_emisora_id: COMPANY_ID,
+          tipo_ambiente: empresaMock.tipo_ambiente,
+          codigo_establecimiento: empresaMock.codigo_establecimiento,
+          punto_emision: empresaMock.punto_emision,
+          document_type: '04',
+        },
         { $inc: { current: 1 } },
         { upsert: true, new: true },
       );
