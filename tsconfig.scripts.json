@@ -22,6 +22,10 @@
     "outDir": "dist-scripts",
     "types": ["node"]
   },
-  "include": ["scripts/create-admin.ts", "scripts/seed-identification-types.ts"],
+  "include": [
+    "scripts/create-admin.ts",
+    "scripts/seed-identification-types.ts",
+    "scripts/migrate-sequence-series.ts"
+  ],
   "exclude": ["node_modules", "dist", "dist-scripts", "admin", "__tests__"]
 }

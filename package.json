@@ -21,7 +21,8 @@
     "validate": "npm run typecheck && npm run lint && npm run build && npm run test:ci",
     "format": "prettier --write \"src/**/*.ts\" \"__tests__/**/*.ts\"",
     "create-admin": "ts-node scripts/create-admin.ts",
-    "seed:identification-types": "ts-node scripts/seed-identification-types.ts"
+    "seed:identification-types": "ts-node scripts/seed-identification-types.ts",
+    "migrate:sequence-series": "ts-node scripts/migrate-sequence-series.ts"
   },
   "keywords": [
     "facturacion-electronica",
