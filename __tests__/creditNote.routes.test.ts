@@ -2,18 +2,22 @@ import request from 'supertest';
 import { createApp } from '../src/testApp';
 
 // --- Model mocks ---
+// Behavior is NOT configured here: every default lives in seedMockDefaults()
+// below, which beforeEach re-applies after jest.resetAllMocks(). See the
+// comment on beforeEach for why the reset has to be resetAllMocks and not
+// clearAllMocks.
 const creditNoteInstanceMocks = {
-  save: jest.fn().mockResolvedValue({}),
+  save: jest.fn(),
 };
 
 const creditNoteStaticMocks = {
-  find: jest.fn().mockResolvedValue([]),
-  findById: jest.fn().mockResolvedValue(null),
-  findOne: jest.fn().mockResolvedValue(null),
-  findByIdAndUpdate: jest.fn().mockResolvedValue(null),
-  findByIdAndDelete: jest.fn().mockResolvedValue(null),
-  findOneAndUpdate: jest.fn().mockResolvedValue(null),
-  findOneAndDelete: jest.fn().mockResolvedValue(null),
+  find: jest.fn(),
+  findById: jest.fn(),
+  findOne: jest.fn(),
+  findByIdAndUpdate: jest.fn(),
+  findByIdAndDelete: jest.fn(),
+  findOneAndUpdate: jest.fn(),
+  findOneAndDelete: jest.fn(),
 };
 
 const savedCreditNotes: any[] = [];
@@ -38,7 +42,7 @@ jest.mock('../src/models/CreditNote', () => {
 });
 
 const creditNotePDFStaticMocks = {
-  findOne: jest.fn().mockResolvedValue(null),
+  findOne: jest.fn(),
 };
 
 jest.mock('../src/models/CreditNotePDF', () => ({
@@ -59,7 +63,7 @@ jest.mock('../src/services/credit-note.service', () => ({
 // --- ApiKey mock (apiKeyAuth runs on every /api/v1/* request) ---
 const apiKeyStaticMocks = {
   findOne: jest.fn(),
-  findByIdAndUpdate: jest.fn().mockResolvedValue(null),
+  findByIdAndUpdate: jest.fn(),
 };
 jest.mock('../src/models/ApiKey', () => ({
   __esModule: true,
@@ -73,12 +77,32 @@ jest.mock('../src/models/ApiKey', () => ({
     findByIdAndUpdate: (...args: any[]) => apiKeyStaticMocks.findByIdAndUpdate(...args),
   },
 }));
-apiKeyStaticMocks.findOne.mockResolvedValue({
-  _id: 'api-key-1',
-  revoked_at: undefined,
-  last_used_at: undefined,
-  empresa_emisora_id: { _id: 'company-1', active: true },
-});
+/**
+ * The baseline behavior every test starts from. Kept in one function because
+ * beforeEach wipes ALL mock behavior (jest.resetAllMocks) and then re-applies
+ * it, which is what makes each test's mock state independent of whatever ran
+ * before it.
+ */
+const seedMockDefaults = (): void => {
+  creditNoteInstanceMocks.save.mockResolvedValue({});
+  creditNoteStaticMocks.find.mockResolvedValue([]);
+  creditNoteStaticMocks.findById.mockResolvedValue(null);
+  creditNoteStaticMocks.findOne.mockResolvedValue(null);
+  creditNoteStaticMocks.findByIdAndUpdate.mockResolvedValue(null);
+  creditNoteStaticMocks.findByIdAndDelete.mockResolvedValue(null);
+  creditNoteStaticMocks.findOneAndUpdate.mockResolvedValue(null);
+  creditNoteStaticMocks.findOneAndDelete.mockResolvedValue(null);
+  creditNotePDFStaticMocks.findOne.mockResolvedValue(null);
+  apiKeyStaticMocks.findOne.mockResolvedValue({
+    _id: 'api-key-1',
+    revoked_at: undefined,
+    last_used_at: undefined,
+    empresa_emisora_id: { _id: 'company-1', active: true },
+  });
+  apiKeyStaticMocks.findByIdAndUpdate.mockResolvedValue(null);
+};
+
+seedMockDefaults();
 
 const app = createApp();
 const authHeader = 'sk_live_test_token_1234567890';
@@ -101,7 +125,25 @@ const notaCreditoPayload = {
 
 describe('Credit note routes', () => {
   beforeEach(() => {
-    jest.clearAllMocks();
+    // resetAllMocks, NOT clearAllMocks. clearAllMocks only wipes recorded
+    // calls; it leaves any still-queued mockResolvedValueOnce/
+    // mockRejectedValueOnce value sitting in the mock's one-shot queue. Those
+    // queues are consumed in FIFO order, so a single value that its own test
+    // never consumed is silently handed to the NEXT test that calls the same
+    // mock, shifting every subsequent value by one and producing results that
+    // look like two tests swapped their outcomes.
+    //
+    // A test can fail to consume what it queued without doing anything wrong:
+    // if its HTTP request dies before reaching the handler (this suite does
+    // intermittently produce "socket hang up" under full-suite load), the
+    // queued value is simply never read. That made the corruption both
+    // order-dependent and attributed to the wrong test.
+    //
+    // resetAllMocks drains those queues along with the call records, so each
+    // test starts from a known state no matter what happened before it;
+    // seedMockDefaults puts the baseline behavior back.
+    jest.resetAllMocks();
+    seedMockDefaults();
   });
 
   describe('POST /api/v1/credit-note/complete', () => {
