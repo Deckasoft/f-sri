@@ -1,10 +1,14 @@
 import { Schema, model, Document, Types } from 'mongoose';
+import { applyEmissionSeriesIndex, emissionSeriesFields } from './emissionSeries';
 
 export interface IDeliveryNote extends Document {
   empresa_emisora_id: Types.ObjectId;
   fecha_emision: Date;
   clave_acceso: string;
   secuencial: string;
+  tipo_ambiente: number;
+  codigo_establecimiento: string;
+  punto_emision: string;
   estado: string;
   dir_partida: string;
   razon_social_transportista: string;
@@ -30,6 +34,7 @@ const schema = new Schema<IDeliveryNote>({
   fecha_emision: { type: Date, required: true },
   clave_acceso: { type: String, required: true },
   secuencial: { type: String, required: true },
+  ...emissionSeriesFields,
   estado: { type: String, required: true },
   dir_partida: { type: String, required: true },
   razon_social_transportista: { type: String, required: true },
@@ -49,5 +54,7 @@ const schema = new Schema<IDeliveryNote>({
   sri_fecha_respuesta: { type: Date },
   datos_originales: { type: String },
 });
+
+applyEmissionSeriesIndex(schema);
 
 export default model<IDeliveryNote>('DeliveryNote', schema);

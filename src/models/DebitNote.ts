@@ -1,4 +1,5 @@
 import { Schema, model, Document, Types } from 'mongoose';
+import { applyEmissionSeriesIndex, emissionSeriesFields } from './emissionSeries';
 
 export interface IDebitNote extends Document {
   empresa_emisora_id: Types.ObjectId;
@@ -7,6 +8,9 @@ export interface IDebitNote extends Document {
   fecha_emision: Date;
   clave_acceso: string;
   secuencial: string;
+  tipo_ambiente: number;
+  codigo_establecimiento: string;
+  punto_emision: string;
   estado: string;
   cod_doc_modificado: string;
   num_doc_modificado: string;
@@ -33,6 +37,7 @@ const schema = new Schema<IDebitNote>({
   fecha_emision: { type: Date, required: true },
   clave_acceso: { type: String, required: true },
   secuencial: { type: String, required: true },
+  ...emissionSeriesFields,
   estado: { type: String, required: true },
   cod_doc_modificado: { type: String, required: true },
   num_doc_modificado: { type: String, required: true },
@@ -56,5 +61,7 @@ const schema = new Schema<IDebitNote>({
   sri_fecha_respuesta: { type: Date },
   datos_originales: { type: String },
 });
+
+applyEmissionSeriesIndex(schema);
 
 export default model<IDebitNote>('DebitNote', schema);

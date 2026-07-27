@@ -8,6 +8,7 @@ import { PDFStorageFactory } from './storage';
 import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
+import { emissionSeriesOf } from '../models/emissionSeries';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
@@ -125,6 +126,7 @@ export class DebitNoteService {
       fecha_emision: fechaEmision,
       clave_acceso: claveAcceso,
       secuencial,
+      ...emissionSeriesOf(empresa),
       estado: 'CREADA',
       cod_doc_modificado: datos.infoNotaDebito.codDocModificado,
       num_doc_modificado: datos.infoNotaDebito.numDocModificado,

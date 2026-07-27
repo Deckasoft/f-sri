@@ -7,6 +7,7 @@ import { generateInvoicePDF } from '../utils/pdf.utils';
 import { PDFStorageFactory } from './storage';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
+import { emissionSeriesOf } from '../models/emissionSeries';
 import { registerScheduledCheck, unregisterScheduledCheck } from '../utils/scheduledCheck.utils';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
@@ -136,6 +137,7 @@ export class InvoiceService {
       fecha_emision: datos.fechaEmision,
       clave_acceso: datos.claveAcceso,
       secuencial: datos.secuencial,
+      ...datos.serie,
       estado: 'CREADA',
       total_sin_impuestos: datos.totalSinImpuestos,
       total_iva: datos.totalIva,
@@ -248,6 +250,7 @@ export class InvoiceService {
       fechaEmision,
       claveAcceso,
       secuencial,
+      serie: emissionSeriesOf(empresa),
       totalSinImpuestos,
       totalIva,
       totalConImpuestos,
