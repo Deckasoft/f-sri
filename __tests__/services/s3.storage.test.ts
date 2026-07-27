@@ -61,24 +61,36 @@ describe('S3PDFStorage', () => {
   });
 
   describe('constructor', () => {
-    it('configures the S3 client with the region and credentials from the environment', () => {
+    // No `credentials` block: passing one explicitly meant no sessionToken
+    // was ever sent, so temporary credentials (SSO, assume-role, any STS
+    // call) were rejected by S3 outright, and the cached client could not
+    // refresh them. Omitting it hands resolution to the SDK's default
+    // provider chain, which also covers instance roles and IAM Roles
+    // Anywhere.
+    it('configures the S3 client with only the region, leaving credentials to the SDK provider chain', () => {
       new S3PDFStorage();
 
-      expect(s3ClientConstructorMock).toHaveBeenCalledWith({
-        region: 'us-east-1',
-        credentials: {
-          accessKeyId: 'test-access-key',
-          secretAccessKey: 'test-secret-key',
-        },
-      });
+      expect(s3ClientConstructorMock).toHaveBeenCalledWith({ region: 'us-east-1' });
     });
 
-    it.each(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY', 'AWS_REGION', 'S3_BUCKET'])(
+    it.each(['AWS_REGION', 'S3_BUCKET'])(
       'throws a descriptive error when %s is missing (lazy validation, not process-boot)',
       (missingVar) => {
         delete process.env[missingVar];
 
         expect(() => new S3PDFStorage()).toThrow('Configuración de S3 inválida');
+      },
+    );
+
+    // These are no longer required here on purpose — role-based credential
+    // modes supply no such environment variables at all, and demanding them
+    // would rule those modes out before the SDK ever gets a chance.
+    it.each(['AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY'])(
+      'constructs without %s, leaving that to the provider chain',
+      (optionalVar) => {
+        delete process.env[optionalVar];
+
+        expect(() => new S3PDFStorage()).not.toThrow();
       },
     );
   });

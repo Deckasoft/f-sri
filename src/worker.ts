@@ -60,12 +60,7 @@ const start = async (): Promise<void> => {
     console.warn(`\n${signal} recibido, cerrando worker…`);
     // Close the workers first so in-flight jobs finish and are not lost, then
     // release the producers and the shared connection.
-    await Promise.all([
-      authorizationWorker.close(),
-      pdfWorker.close(),
-      emailWorker.close(),
-      reconcilerWorker.close(),
-    ]);
+    await Promise.all([authorizationWorker.close(), pdfWorker.close(), emailWorker.close(), reconcilerWorker.close()]);
     await closeQueues();
     await closeRedisConnection();
     await mongoose.disconnect();
