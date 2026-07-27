@@ -91,13 +91,34 @@ export const enqueueAuthorizationCheck = async (
  * timestamp) and could be produced for a comprobante the SRI went on to
  * reject. Nothing regenerated it when the real authorization arrived.
  */
-export const enqueuePdfGeneration = async (documentType: DocumentType, documentId: string): Promise<void> => {
-  await getQueue(PDF_QUEUE).add('generate', { documentType, documentId } satisfies PdfJob, {
+export const enqueuePdfGeneration = async (
+  documentType: DocumentType,
+  documentId: string,
+  { force = false }: { force?: boolean } = {},
+): Promise<void> => {
+  const queue = getQueue(PDF_QUEUE);
+  const jobId = `${documentType}-${documentId}`;
+
+  // Job ids are deduplicated, and BullMQ counts a job that has already reached
+  // a terminal state as existing: adding the same id again is silently
+  // ignored, returning the old job. That is what we want on the normal path
+  // (an authorization checked twice must not render the RIDE twice), but it
+  // makes recovery impossible -- the reconciler could never re-run a job that
+  // had already completed or failed.
+  //
+  // `force` is the recovery path: drop the stale job first so the new one is
+  // really queued. The reconciler has already established from the database
+  // that the RIDE is genuinely missing, so this cannot cause duplicate work.
+  if (force) {
+    await queue.remove(jobId).catch(() => undefined);
+  }
+
+  await queue.add('generate', { documentType, documentId } satisfies PdfJob, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 10_000 },
     removeOnComplete: { age: 3_600, count: 1_000 },
     removeOnFail: false,
-    jobId: `${documentType}-${documentId}`,
+    jobId,
   });
 };
 
@@ -107,13 +128,28 @@ export const enqueuePdfGeneration = async (documentType: DocumentType, documentI
  * email_estado is already ENVIADO — which matters because the reconciler can
  * legitimately drive the same comprobante through this path more than once.
  */
-export const enqueueInvoiceEmail = async (claveAcceso: string): Promise<void> => {
-  await getQueue(EMAIL_QUEUE).add('send', { claveAcceso } satisfies EmailJob, {
+export const enqueueInvoiceEmail = async (
+  claveAcceso: string,
+  { force = false }: { force?: boolean } = {},
+): Promise<void> => {
+  const queue = getQueue(EMAIL_QUEUE);
+  const jobId = `email-${claveAcceso}`;
+
+  // Same recovery problem as enqueuePdfGeneration: a job that already reached
+  // a terminal state keeps its id, so a plain add is silently ignored. It bit
+  // exactly here -- the email job burned all five attempts against a RIDE that
+  // did not exist yet, and once the RIDE was finally generated its own failed
+  // job id blocked every retry.
+  if (force) {
+    await queue.remove(jobId).catch(() => undefined);
+  }
+
+  await queue.add('send', { claveAcceso } satisfies EmailJob, {
     attempts: 5,
     backoff: { type: 'exponential', delay: 30_000 },
     removeOnComplete: { age: 3_600, count: 1_000 },
     removeOnFail: false,
-    jobId: `email-${claveAcceso}`,
+    jobId,
   });
 };
 

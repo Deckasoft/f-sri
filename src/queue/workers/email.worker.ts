@@ -46,7 +46,13 @@ export const processEmailJob = async (job: Job<EmailJob>): Promise<void> => {
   // silently undeliverable just because the client record has no email.
   const recipient = cliente?.email || empresa?.email_notificacion;
   if (!recipient) {
-    invoicePDF.email_estado = 'NO_ENVIADO';
+    // ERROR, not NO_ENVIADO. NO_ENVIADO is the model's default and therefore
+    // means "not attempted yet" -- which is exactly what the reconciler
+    // sweeps for. Reusing it here would make an undeliverable RIDE
+    // indistinguishable from one whose job was lost, and the reconciler
+    // would re-enqueue it forever.
+    invoicePDF.email_estado = 'ERROR';
+    invoicePDF.email_intentos = (invoicePDF.email_intentos ?? 0) + 1;
     invoicePDF.email_ultimo_error = 'El cliente no tiene email y la empresa no tiene email_notificacion';
     await invoicePDF.save();
     // Not thrown: retrying cannot conjure an address. It is recorded on the

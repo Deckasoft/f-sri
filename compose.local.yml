@@ -96,8 +96,13 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    mem_limit: 512m
-    mem_reservation: 128m
+    # Same ceiling as the api, and for the same reason: the RIDE is rendered
+    # by a headless Chromium, which moved into this process. 512m was not
+    # enough -- Chromium died on launch under real job load ("Failed to launch
+    # the browser process"), while launching fine when nothing else was
+    # running, which is exactly how an under-provisioned limit presents.
+    mem_limit: 768m
+    mem_reservation: 256m
 
   # No volume, deliberately: the queue is an accelerator, not the source of
   # truth. Everything in it is re-derivable from MongoDB by the reconciler,

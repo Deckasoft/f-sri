@@ -93,7 +93,11 @@ describe('processEmailJob', () => {
 
   // Retrying cannot conjure an address, so this records the gap instead of
   // burning the retry budget on it.
-  it('records NO_ENVIADO without throwing when there is no address at all', async () => {
+  // ERROR rather than NO_ENVIADO is load-bearing: NO_ENVIADO is the model
+  // default and means "never attempted", which is what the reconciler sweeps
+  // for. Marking an undeliverable RIDE NO_ENVIADO would have it re-enqueued
+  // every five minutes forever.
+  it('records ERROR without throwing when there is no address at all', async () => {
     clientFindById.mockResolvedValue({ razon_social: 'CLIENTE S.A.' });
     companyFindById.mockResolvedValue({ razon_social: 'EMISOR S.A.' });
     const doc = createMockInvoicePDF();
@@ -102,7 +106,8 @@ describe('processEmailJob', () => {
     await expect(processEmailJob(job())).resolves.toBeUndefined();
 
     expect(sendInvoiceEmailMock).not.toHaveBeenCalled();
-    expect(doc.email_estado).toBe('NO_ENVIADO');
+    expect(doc.email_estado).toBe('ERROR');
+    expect(doc.email_estado).not.toBe('NO_ENVIADO');
     expect(doc.email_ultimo_error).toMatch(/no tiene email/);
   });
 

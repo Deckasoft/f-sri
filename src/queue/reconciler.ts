@@ -7,6 +7,12 @@ import CreditNote from '../models/CreditNote';
 import DebitNote from '../models/DebitNote';
 import DeliveryNote from '../models/DeliveryNote';
 import Withholding from '../models/Withholding';
+import InvoicePDF from '../models/InvoicePDF';
+import CreditNotePDF from '../models/CreditNotePDF';
+import DebitNotePDF from '../models/DebitNotePDF';
+import DeliveryNotePDF from '../models/DeliveryNotePDF';
+import WithholdingPDF from '../models/WithholdingPDF';
+import { enqueuePdfGeneration, enqueueInvoiceEmail } from './queues';
 import type { DocumentType } from '../utils/sequence.utils';
 
 export const RECONCILE_QUEUE = 'sri-reconcile';
@@ -18,12 +24,16 @@ const RECONCILE_EVERY_MS = 5 * 60 * 1000;
 
 const NON_TERMINAL_STATES = ['PENDIENTE', 'RECIBIDA'];
 
-const DOCUMENT_MODELS: ReadonlyArray<{ documentType: DocumentType; model: mongoose.Model<any> }> = [
-  { documentType: '01', model: Invoice },
-  { documentType: '04', model: CreditNote },
-  { documentType: '05', model: DebitNote },
-  { documentType: '06', model: DeliveryNote },
-  { documentType: '07', model: Withholding },
+const DOCUMENT_MODELS: ReadonlyArray<{
+  documentType: DocumentType;
+  model: mongoose.Model<any>;
+  pdfModel: mongoose.Model<any>;
+}> = [
+  { documentType: '01', model: Invoice, pdfModel: InvoicePDF },
+  { documentType: '04', model: CreditNote, pdfModel: CreditNotePDF },
+  { documentType: '05', model: DebitNote, pdfModel: DebitNotePDF },
+  { documentType: '06', model: DeliveryNote, pdfModel: DeliveryNotePDF },
+  { documentType: '07', model: Withholding, pdfModel: WithholdingPDF },
 ];
 
 /**
@@ -61,6 +71,78 @@ export const reconcilePendingAuthorizations = async (now: number): Promise<numbe
 };
 
 /**
+ * Re-enqueues RIDE generation for comprobantes the SRI already authorized
+ * but that have no PDF.
+ *
+ * The authorization sweep above does not cover these: it only looks at
+ * PENDIENTE/RECIBIDA, so the moment a comprobante reaches AUTORIZADO it
+ * falls outside that query. Without this, a PDF job that failed, exhausted
+ * its retries, or was lost with Redis stranded the document permanently —
+ * authorized, no RIDE, and nothing to notice. That is exactly what happened
+ * when Chromium could not launch in an under-provisioned worker: the
+ * comprobante was authorized correctly and the RIDE simply never existed.
+ *
+ * It is also what makes the claim "the queue is an accelerator, not the
+ * source of truth" actually true for the whole pipeline rather than only
+ * for authorization.
+ */
+export const reconcileMissingPdfs = async (now: number): Promise<number> => {
+  const cutoffId = mongoose.Types.ObjectId.createFromTime(Math.floor((now - STALE_AFTER_MS) / 1000));
+
+  const counts = await Promise.all(
+    DOCUMENT_MODELS.map(async ({ documentType, model, pdfModel }) => {
+      const authorized = await model
+        .find({ sri_estado: 'AUTORIZADO', _id: { $lt: cutoffId } }, { _id: 1, clave_acceso: 1 })
+        .lean();
+      if (authorized.length === 0) {
+        return 0;
+      }
+
+      // A row in estado 'ERROR' counts as missing on purpose: it records a
+      // generation that failed, so the RIDE still does not exist.
+      const generated = await pdfModel
+        .find(
+          { claveAcceso: { $in: authorized.map((d: any) => d.clave_acceso) }, estado: 'GENERADO' },
+          { claveAcceso: 1 },
+        )
+        .lean();
+      const have = new Set(generated.map((p: any) => p.claveAcceso));
+
+      const missing = authorized.filter((d: any) => !have.has(d.clave_acceso));
+      // force: the previous job for this document has already reached a
+      // terminal state, and its id would otherwise swallow the re-enqueue.
+      await Promise.all(missing.map((d: any) => enqueuePdfGeneration(documentType, String(d._id), { force: true })));
+      return missing.length;
+    }),
+  );
+
+  return counts.reduce((total, n) => total + n, 0);
+};
+
+/**
+ * Re-enqueues emails for facturas whose RIDE exists but was never sent.
+ *
+ * Only NO_ENVIADO is swept, which is the model default and therefore means
+ * "never attempted" — the lost-job case. ERROR is deliberately excluded: it
+ * means the send was tried and failed (bad address, Resend rejecting), which
+ * BullMQ has already retried and which needs a human, not an endless
+ * five-minute redelivery loop.
+ */
+export const reconcileUnsentEmails = async (now: number): Promise<number> => {
+  const cutoffId = mongoose.Types.ObjectId.createFromTime(Math.floor((now - STALE_AFTER_MS) / 1000));
+
+  const unsent = await InvoicePDF.find(
+    { estado: 'GENERADO', email_estado: 'NO_ENVIADO', _id: { $lt: cutoffId } },
+    { claveAcceso: 1 },
+  ).lean();
+
+  // force, for the same reason as the RIDE sweep: a job that already failed
+  // keeps its id and would swallow the re-enqueue.
+  await Promise.all(unsent.map((pdf: any) => enqueueInvoiceEmail(pdf.claveAcceso, { force: true })));
+  return unsent.length;
+};
+
+/**
  * Registers the repeatable sweep. Using a BullMQ repeatable job rather than
  * a setInterval means it survives a worker restart and does not multiply if
  * more than one worker process is running.
@@ -85,9 +167,19 @@ export const createReconcilerWorker = (): Worker =>
   new Worker(
     RECONCILE_QUEUE,
     async () => {
-      const requeued = await reconcilePendingAuthorizations(Date.now());
-      if (requeued > 0) {
-        console.warn(`♻️  Reconciliador: ${requeued} comprobante(s) pendientes re-encolados`);
+      const now = Date.now();
+      const authorizations = await reconcilePendingAuthorizations(now);
+      const pdfs = await reconcileMissingPdfs(now);
+      const emails = await reconcileUnsentEmails(now);
+
+      if (authorizations > 0) {
+        console.warn(`♻️  Reconciliador: ${authorizations} comprobante(s) sin autorizar re-encolados`);
+      }
+      if (pdfs > 0) {
+        console.warn(`♻️  Reconciliador: ${pdfs} RIDE(s) faltantes re-encolados`);
+      }
+      if (emails > 0) {
+        console.warn(`♻️  Reconciliador: ${emails} email(s) sin enviar re-encolados`);
       }
     },
     { connection: getRedisConnection(), concurrency: 1 },

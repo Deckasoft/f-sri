@@ -76,8 +76,11 @@ services:
     # No healthcheck: the worker binds no port. Its liveness shows up as jobs
     # draining; a dead worker leaves comprobantes in PENDIENTE, which the
     # reconciler re-enqueues as soon as one is running again.
-    mem_limit: 512m
-    mem_reservation: 128m
+    # Same ceiling as the api, and for the same reason: the RIDE is rendered
+    # by a headless Chromium, which moved into this process. 512m was not
+    # enough -- Chromium died on launch under real job load.
+    mem_limit: 768m
+    mem_reservation: 256m
 
   # Job store only. Everything in here is derivable from MongoDB — the
   # reconciler (src/queue/reconciler.ts) re-enqueues anything still awaiting

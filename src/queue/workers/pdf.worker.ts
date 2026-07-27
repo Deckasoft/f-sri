@@ -7,14 +7,26 @@ import { DebitNoteService } from '../../services/debit-note.service';
 import { DeliveryNoteService } from '../../services/delivery-note.service';
 import { WithholdingService } from '../../services/withholding.service';
 import Invoice from '../../models/Invoice';
+import CreditNote from '../../models/CreditNote';
+import DebitNote from '../../models/DebitNote';
+import DeliveryNote from '../../models/DeliveryNote';
+import Withholding from '../../models/Withholding';
+import InvoicePDF from '../../models/InvoicePDF';
+import CreditNotePDF from '../../models/CreditNotePDF';
+import DebitNotePDF from '../../models/DebitNotePDF';
+import DeliveryNotePDF from '../../models/DeliveryNotePDF';
+import WithholdingPDF from '../../models/WithholdingPDF';
 import type { DocumentType } from '../../utils/sequence.utils';
 
-const GENERATORS: Record<DocumentType, (documentId: string) => Promise<void>> = {
-  '01': (id) => InvoiceService.generarPDFDesdeId(id),
-  '04': (id) => CreditNoteService.generarPDFDesdeId(id),
-  '05': (id) => DebitNoteService.generarPDFDesdeId(id),
-  '06': (id) => DeliveryNoteService.generarPDFDesdeId(id),
-  '07': (id) => WithholdingService.generarPDFDesdeId(id),
+const GENERATORS: Record<
+  DocumentType,
+  { generate: (documentId: string) => Promise<void>; model: any; pdfModel: any }
+> = {
+  '01': { generate: (id) => InvoiceService.generarPDFDesdeId(id), model: Invoice, pdfModel: InvoicePDF },
+  '04': { generate: (id) => CreditNoteService.generarPDFDesdeId(id), model: CreditNote, pdfModel: CreditNotePDF },
+  '05': { generate: (id) => DebitNoteService.generarPDFDesdeId(id), model: DebitNote, pdfModel: DebitNotePDF },
+  '06': { generate: (id) => DeliveryNoteService.generarPDFDesdeId(id), model: DeliveryNote, pdfModel: DeliveryNotePDF },
+  '07': { generate: (id) => WithholdingService.generarPDFDesdeId(id), model: Withholding, pdfModel: WithholdingPDF },
 };
 
 /**
@@ -31,25 +43,47 @@ const GENERATORS: Record<DocumentType, (documentId: string) => Promise<void>> = 
  */
 export const processPdfJob = async (job: Job<PdfJob>): Promise<void> => {
   const { documentType, documentId } = job.data;
-  const generate = GENERATORS[documentType];
-  if (!generate) {
+  const entry = GENERATORS[documentType];
+  if (!entry) {
     throw new Error(`Tipo de documento desconocido en la cola de PDF: ${documentType}`);
   }
 
-  await generate(documentId);
+  await entry.generate(documentId);
+
+  // Verify the RIDE actually exists, rather than trusting that nothing threw.
+  //
+  // The generators swallow their own failures: they catch, log, and write an
+  // 'ERROR' row instead of rethrowing. So a job whose Chromium never launched
+  // still returned normally, BullMQ marked it COMPLETED, and the attempts/
+  // backoff configured on this queue never applied -- it was dead
+  // configuration. Worse, the completed job id then blocked any re-enqueue,
+  // because job ids are deduplicated.
+  //
+  // Checking the outcome instead of the absence of an exception is what makes
+  // the retry budget real.
+  const documento: any = await entry.model.findById(documentId, { clave_acceso: 1 }).lean();
+  if (!documento?.clave_acceso) {
+    throw new Error(`Comprobante ${documentType}:${documentId} no encontrado tras generar el RIDE`);
+  }
+
+  const pdf: any = await entry.pdfModel.findOne({ claveAcceso: documento.clave_acceso }, { estado: 1 }).lean();
+  if (pdf?.estado !== 'GENERADO') {
+    throw new Error(
+      `El RIDE de ${documentType}:${documentId} no se generó (estado: ${pdf?.estado ?? 'sin registro'})`,
+    );
+  }
 
   if (documentType === '01') {
-    const factura = await Invoice.findById(documentId, { clave_acceso: 1 }).lean();
-    if (factura?.clave_acceso) {
-      await enqueueInvoiceEmail(factura.clave_acceso);
-    }
+    await enqueueInvoiceEmail(documento.clave_acceso);
   }
 };
 
 export const createPdfWorker = (): Worker<PdfJob> =>
   new Worker<PdfJob>(PDF_QUEUE, processPdfJob, {
     connection: getRedisConnection(),
-    // Each job launches a headless Chromium (see src/utils/pdf.utils.ts),
-    // which is memory-hungry; the worker container is capped at 512m.
-    concurrency: 2,
+    // One at a time. Each job launches a headless Chromium (see
+    // src/utils/pdf.utils.ts); two concurrent instances in a memory-capped
+    // container is what made Chromium fail to launch at all. Throughput here
+    // is not the constraint -- correctness is.
+    concurrency: 1,
   });

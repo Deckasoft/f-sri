@@ -43,8 +43,30 @@ const InvoicePDFSchema: Schema = new Schema({
   claveAcceso: { type: String, required: true, unique: true },
 
   // Campos actualizados para el nuevo sistema de almacenamiento
-  pdf_url: { type: String, required: true }, // Key de S3 o URL pública -- ver el comentario en IInvoicePDF arriba
-  pdf_public_id: { type: String, required: true }, // ID único en el proveedor
+  // Obligatorios solo cuando el RIDE se generó de verdad.
+  //
+  // Antes eran `required: true` a secas, y el camino de error del servicio
+  // guarda un registro con estado 'ERROR' y estas dos cadenas vacías. Es
+  // decir: el registro cuya única función es dejar constancia de que la
+  // generación falló era, él mismo, invalidable — Mongoose lo rechazaba con
+  // "InvoicePDF validation failed" y el fallo original desaparecía sin dejar
+  // rastro en la base de datos. Un fallo de PDF quedaba totalmente invisible
+  // salvo en los logs del contenedor.
+  //
+  // Los otros cuatro modelos de PDF nunca marcaron estos campos como
+  // requeridos, así que este defecto era exclusivo de las facturas.
+  pdf_url: {
+    type: String,
+    required: function (this: IInvoicePDF) {
+      return this.estado !== 'ERROR';
+    },
+  }, // Key de S3 o URL pública -- ver el comentario en IInvoicePDF arriba
+  pdf_public_id: {
+    type: String,
+    required: function (this: IInvoicePDF) {
+      return this.estado !== 'ERROR';
+    },
+  }, // ID único en el proveedor
   pdf_provider: { type: String, required: true, default: 'local' }, // Proveedor de almacenamiento
 
   fecha_generacion: { type: Date, default: Date.now },
