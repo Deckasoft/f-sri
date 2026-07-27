@@ -43,6 +43,8 @@ const {
   reconcilePendingAuthorizations,
   reconcileMissingPdfs,
   reconcileUnsentEmails,
+  runReconcileSweep,
+  runReconcileSweepOnStartup,
 } = require('../../src/queue/reconciler');
 // Mocked suite-wide in __tests__/setup.ts.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
@@ -170,5 +172,45 @@ describe('reconcileUnsentEmails', () => {
     const [query] = pdfFindMocks.invoicePDF.mock.calls[0];
     expect(query.email_estado).toBe('NO_ENVIADO');
     expect(query.estado).toBe('GENERADO');
+  });
+});
+
+describe('runReconcileSweep', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    Object.values(findMocks).forEach((m) => m.mockReturnValue([]));
+    Object.values(pdfFindMocks).forEach((m) => m.mockReturnValue([]));
+  });
+
+  it('runs all three sweeps in one pass', async () => {
+    findMocks.invoice.mockReturnValue([{ _id: 'factura-1', clave_acceso: 'clave-1' }]);
+
+    await runReconcileSweep(NOW);
+
+    // The authorization sweep and the missing-RIDE sweep query the same
+    // collection with different states, so both must have run.
+    const states = findMocks.invoice.mock.calls.map(([q]: any[]) => q.sri_estado);
+    expect(states).toContainEqual({ $in: ['PENDIENTE', 'RECIBIDA'] });
+    expect(states).toContain('AUTORIZADO');
+    expect(pdfFindMocks.invoicePDF).toHaveBeenCalled();
+  });
+
+  // Non-fatal on purpose: the worker is what processes the jobs this sweep
+  // queues, so a failing sweep must not stop it from starting. The repeatable
+  // job will try again shortly.
+  it('swallows failures at startup rather than stopping the worker', async () => {
+    findMocks.invoice.mockImplementation(() => {
+      throw new Error('mongo caído');
+    });
+
+    await expect(runReconcileSweepOnStartup()).resolves.toBeUndefined();
+  });
+
+  it('propagates failures when called directly, so the repeatable job records them', async () => {
+    findMocks.invoice.mockImplementation(() => {
+      throw new Error('mongo caído');
+    });
+
+    await expect(runReconcileSweep(NOW)).rejects.toThrow(/mongo caído/);
   });
 });
