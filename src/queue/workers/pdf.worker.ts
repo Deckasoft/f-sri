@@ -18,16 +18,18 @@ import DeliveryNotePDF from '../../models/DeliveryNotePDF';
 import WithholdingPDF from '../../models/WithholdingPDF';
 import type { DocumentType } from '../../utils/sequence.utils';
 
-const GENERATORS: Record<
-  DocumentType,
-  { generate: (documentId: string) => Promise<void>; model: any; pdfModel: any }
-> = {
-  '01': { generate: (id) => InvoiceService.generarPDFDesdeId(id), model: Invoice, pdfModel: InvoicePDF },
-  '04': { generate: (id) => CreditNoteService.generarPDFDesdeId(id), model: CreditNote, pdfModel: CreditNotePDF },
-  '05': { generate: (id) => DebitNoteService.generarPDFDesdeId(id), model: DebitNote, pdfModel: DebitNotePDF },
-  '06': { generate: (id) => DeliveryNoteService.generarPDFDesdeId(id), model: DeliveryNote, pdfModel: DeliveryNotePDF },
-  '07': { generate: (id) => WithholdingService.generarPDFDesdeId(id), model: Withholding, pdfModel: WithholdingPDF },
-};
+const GENERATORS: Record<DocumentType, { generate: (documentId: string) => Promise<void>; model: any; pdfModel: any }> =
+  {
+    '01': { generate: (id) => InvoiceService.generarPDFDesdeId(id), model: Invoice, pdfModel: InvoicePDF },
+    '04': { generate: (id) => CreditNoteService.generarPDFDesdeId(id), model: CreditNote, pdfModel: CreditNotePDF },
+    '05': { generate: (id) => DebitNoteService.generarPDFDesdeId(id), model: DebitNote, pdfModel: DebitNotePDF },
+    '06': {
+      generate: (id) => DeliveryNoteService.generarPDFDesdeId(id),
+      model: DeliveryNote,
+      pdfModel: DeliveryNotePDF,
+    },
+    '07': { generate: (id) => WithholdingService.generarPDFDesdeId(id), model: Withholding, pdfModel: WithholdingPDF },
+  };
 
 /**
  * Generates the RIDE for an authorized comprobante, then — for facturas —
@@ -68,9 +70,7 @@ export const processPdfJob = async (job: Job<PdfJob>): Promise<void> => {
 
   const pdf: any = await entry.pdfModel.findOne({ claveAcceso: documento.clave_acceso }, { estado: 1 }).lean();
   if (pdf?.estado !== 'GENERADO') {
-    throw new Error(
-      `El RIDE de ${documentType}:${documentId} no se generó (estado: ${pdf?.estado ?? 'sin registro'})`,
-    );
+    throw new Error(`El RIDE de ${documentType}:${documentId} no se generó (estado: ${pdf?.estado ?? 'sin registro'})`);
   }
 
   if (documentType === '01') {

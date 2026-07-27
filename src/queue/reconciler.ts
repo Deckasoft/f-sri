@@ -143,6 +143,49 @@ export const reconcileUnsentEmails = async (now: number): Promise<number> => {
 };
 
 /**
+ * One pass of all three sweeps.
+ *
+ * Shared by the repeatable job and by the one-off sweep the worker runs at
+ * startup — see runReconcileSweepOnStartup for why both exist.
+ */
+export const runReconcileSweep = async (now: number): Promise<void> => {
+  const authorizations = await reconcilePendingAuthorizations(now);
+  const pdfs = await reconcileMissingPdfs(now);
+  const emails = await reconcileUnsentEmails(now);
+
+  if (authorizations > 0) {
+    console.warn(`♻️  Reconciliador: ${authorizations} comprobante(s) sin autorizar re-encolados`);
+  }
+  if (pdfs > 0) {
+    console.warn(`♻️  Reconciliador: ${pdfs} RIDE(s) faltantes re-encolados`);
+  }
+  if (emails > 0) {
+    console.warn(`♻️  Reconciliador: ${emails} email(s) sin enviar re-encolados`);
+  }
+};
+
+/**
+ * Runs one sweep as soon as the worker is up.
+ *
+ * A BullMQ repeatable job with `every` schedules its FIRST run one interval
+ * from registration, not immediately. Without this, anything stranded by the
+ * deploy that just happened — or by the crash that preceded it — waits up to
+ * five minutes before anything looks at it, which is precisely the window in
+ * which someone is watching the logs wondering why nothing is recovering.
+ *
+ * Deliberately non-fatal: a sweep that fails must not stop the worker from
+ * starting, because the worker is what processes the very jobs the sweep
+ * would have queued. The repeatable job will try again shortly.
+ */
+export const runReconcileSweepOnStartup = async (): Promise<void> => {
+  try {
+    await runReconcileSweep(Date.now());
+  } catch (err) {
+    console.error('❌ El barrido inicial del reconciliador falló:', (err as Error).message);
+  }
+};
+
+/**
  * Registers the repeatable sweep. Using a BullMQ repeatable job rather than
  * a setInterval means it survives a worker restart and does not multiply if
  * more than one worker process is running.
@@ -167,20 +210,7 @@ export const createReconcilerWorker = (): Worker =>
   new Worker(
     RECONCILE_QUEUE,
     async () => {
-      const now = Date.now();
-      const authorizations = await reconcilePendingAuthorizations(now);
-      const pdfs = await reconcileMissingPdfs(now);
-      const emails = await reconcileUnsentEmails(now);
-
-      if (authorizations > 0) {
-        console.warn(`♻️  Reconciliador: ${authorizations} comprobante(s) sin autorizar re-encolados`);
-      }
-      if (pdfs > 0) {
-        console.warn(`♻️  Reconciliador: ${pdfs} RIDE(s) faltantes re-encolados`);
-      }
-      if (emails > 0) {
-        console.warn(`♻️  Reconciliador: ${emails} email(s) sin enviar re-encolados`);
-      }
+      await runReconcileSweep(Date.now());
     },
     { connection: getRedisConnection(), concurrency: 1 },
   );

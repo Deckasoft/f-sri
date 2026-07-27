@@ -7,7 +7,7 @@ import { loadEnv } from './config/env.config';
 import { createAuthorizationWorker } from './queue/workers/authorization.worker';
 import { createPdfWorker } from './queue/workers/pdf.worker';
 import { createEmailWorker } from './queue/workers/email.worker';
-import { createReconcilerWorker, scheduleReconciler } from './queue/reconciler';
+import { createReconcilerWorker, scheduleReconciler, runReconcileSweepOnStartup } from './queue/reconciler';
 import { closeQueues } from './queue/queues';
 import { closeRedisConnection } from './queue/connection';
 
@@ -34,6 +34,12 @@ const start = async (): Promise<void> => {
   await scheduleReconciler();
 
   console.warn('✅ Worker escuchando: autorización SRI + RIDE + email + reconciliador');
+
+  // After the workers exist, so anything this queues is picked up immediately
+  // rather than sitting until the first repeatable run. Not awaited before the
+  // listeners below are attached, but awaited here so startup logs stay in a
+  // sensible order.
+  await runReconcileSweepOnStartup();
 
   pdfWorker.on('failed', (job, err) => {
     console.error(`❌ Generación de RIDE falló para ${job?.id}: ${err.message}`);
