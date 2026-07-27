@@ -77,9 +77,14 @@ describe('processEmailJob', () => {
     expect(doc.email_intentos).toBe(1);
   });
 
-  it('falls back to the company notification address when the client has no email', async () => {
+  // The fallback keeps an authorized factura from being undeliverable, but it
+  // means the RIDE reached the emisor and NOT the customer. email_estado
+  // would read ENVIADO either way, so the substitution is flagged on the row
+  // — otherwise "the client never got their invoice" is invisible.
+  it('falls back to the emisor address when the client has no email, and records that it did', async () => {
     clientFindById.mockResolvedValue({ email: undefined, razon_social: 'CLIENTE S.A.' });
-    invoicePDFFindOne.mockResolvedValue(createMockInvoicePDF());
+    const doc = createMockInvoicePDF();
+    invoicePDFFindOne.mockResolvedValue(doc);
 
     await processEmailJob(job());
 
@@ -89,6 +94,18 @@ describe('processEmailJob', () => {
       'CLIENTE S.A.',
       'EMISOR S.A.',
     );
+    expect(doc.email_enviado_al_emisor).toBe(true);
+    expect(doc.email_destinatario).toBe('avisos@example.test');
+  });
+
+  it('does not flag the substitution when the client does have an email', async () => {
+    const doc = createMockInvoicePDF();
+    invoicePDFFindOne.mockResolvedValue(doc);
+
+    await processEmailJob(job());
+
+    expect(doc.email_destinatario).toBe('cliente@example.test');
+    expect(doc.email_enviado_al_emisor).toBe(false);
   });
 
   // Retrying cannot conjure an address, so this records the gap instead of

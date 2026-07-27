@@ -41,10 +41,23 @@ export const processEmailJob = async (job: Job<EmailJob>): Promise<void> => {
     IssuingCompany.findById(factura.empresa_emisora_id),
   ]);
 
-  // The client's own address is the intended recipient; the company's
-  // notification address is a fallback so an authorized factura is not
-  // silently undeliverable just because the client record has no email.
+  // The client's own address is the intended recipient. The emisor's
+  // notification address is a fallback so an authorized factura is not left
+  // undeliverable just because the client record has no email — but that
+  // fallback means the RIDE does NOT reach the customer, so it is recorded
+  // rather than performed quietly. Without both the warning and the flag,
+  // email_estado reads ENVIADO and everyone assumes the client got it.
+  const sentToEmisorInstead = !cliente?.email && Boolean(empresa?.email_notificacion);
   const recipient = cliente?.email || empresa?.email_notificacion;
+
+  if (sentToEmisorInstead) {
+    console.warn(
+      `⚠️  El cliente "${cliente?.razon_social ?? 'desconocido'}" (${cliente?.identificacion ?? 's/ID'}) no tiene ` +
+        `email: el RIDE ${claveAcceso} se enviará a ${empresa?.email_notificacion} (emisor), NO al cliente. ` +
+        'Añade el email del cliente para que lo reciba.',
+    );
+  }
+
   if (!recipient) {
     // ERROR, not NO_ENVIADO. NO_ENVIADO is the model's default and therefore
     // means "not attempted yet" -- which is exactly what the reconciler
@@ -68,6 +81,7 @@ export const processEmailJob = async (job: Job<EmailJob>): Promise<void> => {
   );
 
   invoicePDF.email_destinatario = recipient;
+  invoicePDF.email_enviado_al_emisor = sentToEmisorInstead;
   invoicePDF.email_intentos = (invoicePDF.email_intentos ?? 0) + 1;
 
   if (result.success) {

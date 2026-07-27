@@ -36,6 +36,14 @@ export interface IInvoicePDF extends Document {
   email_intentos: number;
   email_ultimo_error?: string;
   email_enviado_por?: string; // ID del usuario que envió
+  /**
+   * true cuando el RIDE se envió al email_notificacion del emisor porque el
+   * cliente no tiene email. El envío es correcto, pero NO llegó al cliente:
+   * este flag existe para poder listar esas facturas
+   * (`db.invoicepdfs.find({ email_enviado_al_emisor: true })`) en vez de que
+   * la sustitución quede solo en una línea de log que se pierde.
+   */
+  email_enviado_al_emisor?: boolean;
 }
 
 const InvoicePDFSchema: Schema = new Schema({
@@ -87,6 +95,7 @@ const InvoicePDFSchema: Schema = new Schema({
   email_intentos: { type: Number, required: true, default: 0 },
   email_ultimo_error: { type: String },
   email_enviado_por: { type: String },
+  email_enviado_al_emisor: { type: Boolean, default: false },
 });
 
 // Índice para búsquedas rápidas por factura
