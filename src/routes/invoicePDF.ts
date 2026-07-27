@@ -6,6 +6,7 @@ import IssuingCompany from '../models/IssuingCompany';
 import { getTenantCompanyId } from '../utils/tenant.utils';
 import { sendInvoiceEmail } from '../utils/email.utils';
 import { PDFStorageFactory } from '../services/storage';
+import { enqueuePdfGeneration } from '../queue/queues';
 
 const router = Router();
 
@@ -93,9 +94,16 @@ router.post('/regenerate/:facturaId', async (req, res) => {
     const factura = await Invoice.findOne({ _id: req.params.facturaId, empresa_emisora_id: companyId });
     if (!factura) return res.status(404).json({ message: 'Invoice not found' });
 
-    // This would trigger PDF regeneration
-    // For now, just return a message
-    res.json({ message: 'PDF regeneration requested', facturaId: req.params.facturaId });
+    // Was a no-op that reported success. It now really enqueues the job the
+    // worker consumes; the generator upserts by clave de acceso, so
+    // regenerating overwrites the existing RIDE rather than colliding on the
+    // unique index.
+    await enqueuePdfGeneration('01', String(factura._id));
+
+    res.status(202).json({
+      message: 'Regeneración de RIDE encolada',
+      facturaId: req.params.facturaId,
+    });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
   }

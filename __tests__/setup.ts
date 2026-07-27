@@ -13,7 +13,11 @@ jest.mock('../src/queue/queues', () => ({
   __esModule: true,
   AUTHORIZATION_QUEUE: 'sri-authorization',
   authorizationJobId: (documentType: string, documentId: string) => `${documentType}-${documentId}`,
+  PDF_QUEUE: 'sri-pdf',
+  EMAIL_QUEUE: 'sri-email',
   enqueueAuthorizationCheck: jest.fn().mockResolvedValue(undefined),
+  enqueuePdfGeneration: jest.fn().mockResolvedValue(undefined),
+  enqueueInvoiceEmail: jest.fn().mockResolvedValue(undefined),
   closeQueues: jest.fn().mockResolvedValue(undefined),
 }));
 

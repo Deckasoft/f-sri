@@ -667,7 +667,7 @@ export default {
         tags: ['PDF Management'],
         summary: 'Solicitar el envío del PDF por email',
         description:
-          'Marca el PDF para envío por email al destinatario indicado (estado PENDIENTE). El envío se procesa de forma asíncrona.',
+          'Envía el PDF por email al destinatario indicado. El envío es SÍNCRONO: la respuesta ya refleja el resultado (email_estado ENVIADO o ERROR). Las facturas autorizadas se envían solas a través de la cola; este endpoint es para reenvíos manuales o para dirigir el RIDE a otro destinatario.',
         parameters: [
           {
             name: 'claveAcceso',

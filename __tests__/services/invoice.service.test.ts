@@ -84,6 +84,14 @@ jest.mock('../../src/models/InvoicePDF', () => {
       savedPDFs.push(this);
     }
     save = jest.fn().mockResolvedValue(this);
+    // The success path upserts by claveAcceso rather than constructing a
+    // document (claveAcceso is unique, so regenerating would throw E11000),
+    // so record that payload into savedPDFs too — the assertions read it.
+    static findOneAndUpdate = jest.fn((filter: any, update: any) => {
+      const doc = { ...filter, ...update.$set };
+      savedPDFs.push(doc);
+      return Promise.resolve(doc);
+    });
   }
   return { __esModule: true, default: MockPDF };
 });
@@ -431,7 +439,11 @@ describe('InvoiceService', () => {
       expect(withCompanyP12Mock).not.toHaveBeenCalled();
     });
 
-    it('signs with the real P12, sends, generates the PDF and schedules authorization on RECIBIDA', async () => {
+    // RECIBIDA means the SRI accepted the comprobante for processing, not
+    // that it authorized it — it can still be rejected. No RIDE is produced
+    // at this point, because there is no authorization date to print on it
+    // yet; that happens in consultarAutorizacionSRI.
+    it('signs with the real P12, sends and schedules authorization on RECIBIDA, without generating a PDF', async () => {
       enviarComprobanteSRIMock.mockResolvedValue({ estado: 'RECIBIDA' });
       const factura: any = facturaDoc();
       const empresa = { ...empresaBase(), certificate: p12Base64, certificate_password: P12_PASSWORD };
@@ -440,8 +452,7 @@ describe('InvoiceService', () => {
 
       expect(firmarXMLMock).toHaveBeenCalledWith('<factura/>', p12Path, P12_PASSWORD, '01');
       expect(factura.sri_estado).toBe('RECIBIDA');
-      expect(generateInvoicePDFMock).toHaveBeenCalled();
-      expect(savedPDFs[0].estado).toBe('GENERADO');
+      expect(generateInvoicePDFMock).not.toHaveBeenCalled();
       // The authorization poll is now a queued job rather than an in-process
       // timer; the queue module is mocked suite-wide in __tests__/setup.ts.
       expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('01', 'factura-1');

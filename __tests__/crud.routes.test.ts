@@ -224,6 +224,10 @@ describe('apiKeyAuth middleware', () => {
 // validates with zod (src/routes/product.ts), so it needs a real product.
 // The tenant-scoping contract under test is identical either way — only the
 // body differs, hence the per-route payloads below.
+// Mocked suite-wide in __tests__/setup.ts, so this resolves to a jest.fn().
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { enqueuePdfGeneration } = require('../src/queue/queues');
+
 const createGenericBody = () => ({ campo: 'valor' });
 const updateGenericBody = () => ({ a: 1 });
 const createMockProduct = () => ({
@@ -720,13 +724,17 @@ describe('InvoicePDF routes (scoped via parent Invoice lookup)', () => {
     expect(res.status).toBe(404);
   });
 
-  it('acknowledges PDF regeneration requests for the tenant’s own invoice', async () => {
+  // This endpoint used to return 200 without doing anything at all. It now
+  // enqueues the job the worker consumes, so it answers 202 (accepted, work
+  // happens out of band) rather than 200 (done).
+  it('enqueues PDF regeneration for the tenant’s own invoice', async () => {
     invoiceMock.statics.findOne.mockResolvedValueOnce({ _id: ID });
 
     const res = await request(app).post(`/api/v1/invoice-pdf/regenerate/${ID}`).set('X-API-Key', authHeader);
 
-    expect(res.status).toBe(200);
+    expect(res.status).toBe(202);
     expect(res.body.facturaId).toBe(ID);
+    expect(enqueuePdfGeneration).toHaveBeenCalledWith('01', ID);
   });
 
   it('sends the email and reports email status for the tenant’s own invoice', async () => {

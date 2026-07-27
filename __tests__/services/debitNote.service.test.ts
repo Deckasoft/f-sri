@@ -71,6 +71,14 @@ jest.mock('../../src/models/DebitNotePDF', () => {
       savedPDFs.push(this);
     }
     save = jest.fn().mockResolvedValue(this);
+    // The success path upserts by claveAcceso rather than constructing a
+    // document (claveAcceso is unique, so regenerating would throw E11000),
+    // so record that payload into savedPDFs too — the assertions read it.
+    static findOneAndUpdate = jest.fn((filter: any, update: any) => {
+      const doc = { ...filter, ...update.$set };
+      savedPDFs.push(doc);
+      return Promise.resolve(doc);
+    });
   }
   return { __esModule: true, default: MockPDF };
 });
@@ -267,8 +275,9 @@ describe('DebitNoteService', () => {
 
       expect(firmarXMLMock).toHaveBeenCalledWith('<notaDebito/>', '/tmp/cert.p12', 'test-cert-password', '05');
       expect(nota.sri_estado).toBe('RECIBIDA');
-      expect(generateDebitNotePDFMock).toHaveBeenCalled();
-      expect(savedPDFs[0].estado).toBe('GENERADO');
+      // No RIDE on recepción — it is generated once the SRI authorizes the
+      // comprobante. See the invoice service test for the reasoning.
+      expect(generateDebitNotePDFMock).not.toHaveBeenCalled();
       expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('05', 'nd-1');
     });
 

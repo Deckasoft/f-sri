@@ -9,7 +9,7 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { emissionSeriesOf } from '../models/emissionSeries';
-import { enqueueAuthorizationCheck } from '../queue/queues';
+import { enqueueAuthorizationCheck, enqueuePdfGeneration } from '../queue/queues';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import Withholding from '../models/Withholding';
@@ -191,7 +191,8 @@ export class WithholdingService {
           console.log(
             `✅ RETENCIÓN RECIBIDA POR SRI - ID: ${retencion._id}, Clave: ${retencion.clave_acceso}, Secuencial: ${retencion.secuencial}`,
           );
-          await this.generarPDFRetencion(retencion, empresa, datos);
+          // No PDF here — the RIDE is generated on AUTORIZADO, not on
+          // recepción. See the note in InvoiceService.procesarEnvioSRI.
           await enqueueAuthorizationCheck('07', String(retencion._id));
         } else {
           console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Retención ID: ${retencion._id}`);
@@ -240,6 +241,11 @@ export class WithholdingService {
 
       await retencion.save();
       recordSriOutcome(retencion.clave_acceso, retencion.sri_estado);
+
+      if (respuesta.estado === 'AUTORIZADO') {
+        await enqueuePdfGeneration('07', String(retencion._id));
+      }
+
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);
@@ -250,10 +256,40 @@ export class WithholdingService {
   /**
    * Genera y almacena el PDF (RIDE) de un comprobante de retención recibido por el SRI
    */
+  /**
+   * Rebuilds the RIDE inputs from persisted state, given only an id — the
+   * PDF worker receives nothing else. See InvoiceService.generarPDFDesdeId.
+   */
+  static async generarPDFDesdeId(retencionId: string): Promise<void> {
+    const retencion = await Withholding.findById(retencionId);
+    if (!retencion) {
+      throw new Error(`Retención ${retencionId} no encontrada`);
+    }
+    if (!retencion.datos_originales) {
+      throw new Error(`Retención ${retencionId} no tiene datos_originales: no se puede regenerar el RIDE`);
+    }
+
+    const empresa = await InvoiceService.buscarIssuingCompany(String(retencion.empresa_emisora_id));
+    if (!empresa) {
+      throw new Error(`La empresa emisora de la retención ${retencionId} ya no existe`);
+    }
+
+    const datos: WithholdingRequest = JSON.parse(retencion.datos_originales);
+
+    await this.generarPDFRetencion(retencion, empresa, datos);
+  }
+
   static async generarPDFRetencion(retencion: any, empresa: any, datos: WithholdingRequest): Promise<void> {
     try {
-      const numeroAutorizacion = retencion.clave_acceso;
-      const fechaAutorizacion = retencion.sri_fecha_respuesta || new Date();
+      // See generarPDFFactura: the RIDE must carry the SRI's real
+      // authorization date, so it cannot be produced before one exists.
+      if (!retencion.fecha_autorizacion) {
+        throw new Error(
+          `No se puede generar el RIDE de la retención ${retencion.secuencial}: todavía no tiene fecha de autorización del SRI`,
+        );
+      }
+      const numeroAutorizacion = retencion.autorizacion_numero || retencion.clave_acceso;
+      const fechaAutorizacion = retencion.fecha_autorizacion;
 
       const pdfBuffer = await generateWithholdingPDF({
         retencion: datos,
@@ -269,19 +305,24 @@ export class WithholdingService {
       const filename = `retencion_${retencion.secuencial}_${retencion.clave_acceso}`;
       const uploadResult = await storage.upload(pdfBuffer, filename);
 
-      const withholdingPDF = new WithholdingPDF({
-        retencion_id: retencion._id,
-        claveAcceso: retencion.clave_acceso,
-        pdf_url: uploadResult.url,
-        pdf_public_id: uploadResult.publicId,
-        pdf_provider: uploadResult.provider,
-        tamano_archivo: uploadResult.size,
-        numero_autorizacion: numeroAutorizacion,
-        fecha_autorizacion: fechaAutorizacion,
-        estado: 'GENERADO',
-      });
-
-      await withholdingPDF.save();
+      // Upsert, not insert: claveAcceso is unique, so a regeneration would
+      // otherwise throw E11000.
+      await WithholdingPDF.findOneAndUpdate(
+        { claveAcceso: retencion.clave_acceso },
+        {
+          $set: {
+            retencion_id: retencion._id,
+            pdf_url: uploadResult.url,
+            pdf_public_id: uploadResult.publicId,
+            pdf_provider: uploadResult.provider,
+            tamano_archivo: uploadResult.size,
+            numero_autorizacion: numeroAutorizacion,
+            fecha_autorizacion: fechaAutorizacion,
+            estado: 'GENERADO',
+          },
+        },
+        { upsert: true, new: true },
+      );
       console.log(`✅ PDF de retención guardado: ${uploadResult.url}`);
     } catch (error) {
       console.error('❌ Error generating withholding PDF:', error);

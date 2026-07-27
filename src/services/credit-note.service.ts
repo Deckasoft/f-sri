@@ -9,14 +9,14 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { emissionSeriesOf } from '../models/emissionSeries';
-import { enqueueAuthorizationCheck } from '../queue/queues';
+import { enqueueAuthorizationCheck, enqueuePdfGeneration } from '../queue/queues';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import CreditNote from '../models/CreditNote';
 import CreditNoteDetail from '../models/CreditNoteDetail';
 import CreditNotePDF from '../models/CreditNotePDF';
 import Invoice from '../models/Invoice';
-import { IClient } from '../models/Client';
+import Client, { IClient } from '../models/Client';
 import { IProduct } from '../models/Product';
 
 /**
@@ -265,7 +265,8 @@ export class CreditNoteService {
           console.log(
             `✅ NOTA DE CRÉDITO RECIBIDA POR SRI - ID: ${notaCredito._id}, Clave: ${notaCredito.clave_acceso}, Secuencial: ${notaCredito.secuencial}`,
           );
-          await this.generarPDFNotaCredito(notaCredito, empresa, cliente, productos, datos);
+          // No PDF here — the RIDE is generated on AUTORIZADO, not on
+          // recepción. See the note in InvoiceService.procesarEnvioSRI.
           await enqueueAuthorizationCheck('04', String(notaCredito._id));
         } else {
           console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Nota de crédito ID: ${notaCredito._id}`);
@@ -316,6 +317,11 @@ export class CreditNoteService {
 
       await notaCredito.save();
       recordSriOutcome(notaCredito.clave_acceso, notaCredito.sri_estado);
+
+      if (respuesta.estado === 'AUTORIZADO') {
+        await enqueuePdfGeneration('04', String(notaCredito._id));
+      }
+
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);
@@ -326,6 +332,34 @@ export class CreditNoteService {
   /**
    * Genera y almacena el PDF (RIDE) de una nota de crédito recibida por el SRI
    */
+  /**
+   * Rebuilds the RIDE inputs from persisted state, given only an id — the
+   * PDF worker receives nothing else. See InvoiceService.generarPDFDesdeId.
+   */
+  static async generarPDFDesdeId(notaCreditoId: string): Promise<void> {
+    const notaCredito = await CreditNote.findById(notaCreditoId);
+    if (!notaCredito) {
+      throw new Error(`Nota de crédito ${notaCreditoId} no encontrada`);
+    }
+    if (!notaCredito.datos_originales) {
+      throw new Error(`Nota de crédito ${notaCreditoId} no tiene datos_originales: no se puede regenerar el RIDE`);
+    }
+
+    const empresa = await InvoiceService.buscarIssuingCompany(String(notaCredito.empresa_emisora_id));
+    if (!empresa) {
+      throw new Error(`La empresa emisora de la nota de crédito ${notaCreditoId} ya no existe`);
+    }
+    const cliente = await Client.findById(notaCredito.cliente_id);
+    if (!cliente) {
+      throw new Error(`El cliente de la nota de crédito ${notaCreditoId} ya no existe`);
+    }
+
+    const datos: CreditNoteRequest = JSON.parse(notaCredito.datos_originales);
+    const productos = await this.buscarProducts(datos.detalles, String(notaCredito.empresa_emisora_id));
+
+    await this.generarPDFNotaCredito(notaCredito, empresa, cliente, productos, datos);
+  }
+
   static async generarPDFNotaCredito(
     notaCredito: any,
     empresa: any,
@@ -334,8 +368,15 @@ export class CreditNoteService {
     datos: CreditNoteRequest,
   ): Promise<void> {
     try {
-      const numeroAutorizacion = notaCredito.clave_acceso;
-      const fechaAutorizacion = notaCredito.sri_fecha_respuesta || new Date();
+      // See generarPDFFactura: the RIDE must carry the SRI's real
+      // authorization date, so it cannot be produced before one exists.
+      if (!notaCredito.fecha_autorizacion) {
+        throw new Error(
+          `No se puede generar el RIDE de la nota de crédito ${notaCredito.secuencial}: todavía no tiene fecha de autorización del SRI`,
+        );
+      }
+      const numeroAutorizacion = notaCredito.autorizacion_numero || notaCredito.clave_acceso;
+      const fechaAutorizacion = notaCredito.fecha_autorizacion;
 
       const pdfBuffer = await generateCreditNotePDF({
         notaCredito: datos,
@@ -353,19 +394,24 @@ export class CreditNoteService {
       const filename = `nota_credito_${notaCredito.secuencial}_${notaCredito.clave_acceso}`;
       const uploadResult = await storage.upload(pdfBuffer, filename);
 
-      const creditNotePDF = new CreditNotePDF({
-        nota_credito_id: notaCredito._id,
-        claveAcceso: notaCredito.clave_acceso,
-        pdf_url: uploadResult.url,
-        pdf_public_id: uploadResult.publicId,
-        pdf_provider: uploadResult.provider,
-        tamano_archivo: uploadResult.size,
-        numero_autorizacion: numeroAutorizacion,
-        fecha_autorizacion: fechaAutorizacion,
-        estado: 'GENERADO',
-      });
-
-      await creditNotePDF.save();
+      // Upsert, not insert: claveAcceso is unique, so a regeneration would
+      // otherwise throw E11000.
+      await CreditNotePDF.findOneAndUpdate(
+        { claveAcceso: notaCredito.clave_acceso },
+        {
+          $set: {
+            nota_credito_id: notaCredito._id,
+            pdf_url: uploadResult.url,
+            pdf_public_id: uploadResult.publicId,
+            pdf_provider: uploadResult.provider,
+            tamano_archivo: uploadResult.size,
+            numero_autorizacion: numeroAutorizacion,
+            fecha_autorizacion: fechaAutorizacion,
+            estado: 'GENERADO',
+          },
+        },
+        { upsert: true, new: true },
+      );
       console.log(`✅ PDF de nota de crédito guardado: ${uploadResult.url}`);
     } catch (error) {
       console.error('❌ Error generating credit note PDF:', error);

@@ -9,13 +9,13 @@ import { InvoiceService } from './invoice.service';
 import { withCompanyP12, verifyP12Password } from '../utils/certificate.utils';
 import { getNextSecuencial, type EmissionPoint } from '../utils/sequence.utils';
 import { emissionSeriesOf } from '../models/emissionSeries';
-import { enqueueAuthorizationCheck } from '../queue/queues';
+import { enqueueAuthorizationCheck, enqueuePdfGeneration } from '../queue/queues';
 import { trackBackgroundWork } from '../utils/backgroundWork.utils';
 import { recordEmission, recordSriOutcome } from './usage.service';
 import DebitNote from '../models/DebitNote';
 import DebitNotePDF from '../models/DebitNotePDF';
 import Invoice from '../models/Invoice';
-import { IClient } from '../models/Client';
+import Client, { IClient } from '../models/Client';
 
 /**
  * Servicio para manejar todas las operaciones relacionadas con notas de débito (codDoc 05)
@@ -213,7 +213,8 @@ export class DebitNoteService {
           console.log(
             `✅ NOTA DE DÉBITO RECIBIDA POR SRI - ID: ${notaDebito._id}, Clave: ${notaDebito.clave_acceso}, Secuencial: ${notaDebito.secuencial}`,
           );
-          await this.generarPDFNotaDebito(notaDebito, empresa, cliente, datos);
+          // No PDF here — the RIDE is generated on AUTORIZADO, not on
+          // recepción. See the note in InvoiceService.procesarEnvioSRI.
           await enqueueAuthorizationCheck('05', String(notaDebito._id));
         } else {
           console.log(`⚠️ SRI Estado: ${respuestaSRI.estado} - Nota de débito ID: ${notaDebito._id}`);
@@ -264,6 +265,11 @@ export class DebitNoteService {
 
       await notaDebito.save();
       recordSriOutcome(notaDebito.clave_acceso, notaDebito.sri_estado);
+
+      if (respuesta.estado === 'AUTORIZADO') {
+        await enqueuePdfGeneration('05', String(notaDebito._id));
+      }
+
       return respuesta;
     } catch (error: any) {
       console.error('Error al consultar autorización SRI:', error.message);
@@ -274,6 +280,33 @@ export class DebitNoteService {
   /**
    * Genera y almacena el PDF (RIDE) de una nota de débito recibida por el SRI
    */
+  /**
+   * Rebuilds the RIDE inputs from persisted state, given only an id — the
+   * PDF worker receives nothing else. See InvoiceService.generarPDFDesdeId.
+   */
+  static async generarPDFDesdeId(notaDebitoId: string): Promise<void> {
+    const notaDebito = await DebitNote.findById(notaDebitoId);
+    if (!notaDebito) {
+      throw new Error(`Nota de débito ${notaDebitoId} no encontrada`);
+    }
+    if (!notaDebito.datos_originales) {
+      throw new Error(`Nota de débito ${notaDebitoId} no tiene datos_originales: no se puede regenerar el RIDE`);
+    }
+
+    const empresa = await InvoiceService.buscarIssuingCompany(String(notaDebito.empresa_emisora_id));
+    if (!empresa) {
+      throw new Error(`La empresa emisora de la nota de débito ${notaDebitoId} ya no existe`);
+    }
+    const cliente = await Client.findById(notaDebito.cliente_id);
+    if (!cliente) {
+      throw new Error(`El cliente de la nota de débito ${notaDebitoId} ya no existe`);
+    }
+
+    const datos: DebitNoteRequest = JSON.parse(notaDebito.datos_originales);
+
+    await this.generarPDFNotaDebito(notaDebito, empresa, cliente, datos);
+  }
+
   static async generarPDFNotaDebito(
     notaDebito: any,
     empresa: any,
@@ -281,8 +314,15 @@ export class DebitNoteService {
     datos: DebitNoteRequest,
   ): Promise<void> {
     try {
-      const numeroAutorizacion = notaDebito.clave_acceso;
-      const fechaAutorizacion = notaDebito.sri_fecha_respuesta || new Date();
+      // See generarPDFFactura: the RIDE must carry the SRI's real
+      // authorization date, so it cannot be produced before one exists.
+      if (!notaDebito.fecha_autorizacion) {
+        throw new Error(
+          `No se puede generar el RIDE de la nota de débito ${notaDebito.secuencial}: todavía no tiene fecha de autorización del SRI`,
+        );
+      }
+      const numeroAutorizacion = notaDebito.autorizacion_numero || notaDebito.clave_acceso;
+      const fechaAutorizacion = notaDebito.fecha_autorizacion;
 
       const pdfBuffer = await generateDebitNotePDF({
         notaDebito: datos,
@@ -299,19 +339,24 @@ export class DebitNoteService {
       const filename = `nota_debito_${notaDebito.secuencial}_${notaDebito.clave_acceso}`;
       const uploadResult = await storage.upload(pdfBuffer, filename);
 
-      const debitNotePDF = new DebitNotePDF({
-        nota_debito_id: notaDebito._id,
-        claveAcceso: notaDebito.clave_acceso,
-        pdf_url: uploadResult.url,
-        pdf_public_id: uploadResult.publicId,
-        pdf_provider: uploadResult.provider,
-        tamano_archivo: uploadResult.size,
-        numero_autorizacion: numeroAutorizacion,
-        fecha_autorizacion: fechaAutorizacion,
-        estado: 'GENERADO',
-      });
-
-      await debitNotePDF.save();
+      // Upsert, not insert: claveAcceso is unique, so a regeneration would
+      // otherwise throw E11000.
+      await DebitNotePDF.findOneAndUpdate(
+        { claveAcceso: notaDebito.clave_acceso },
+        {
+          $set: {
+            nota_debito_id: notaDebito._id,
+            pdf_url: uploadResult.url,
+            pdf_public_id: uploadResult.publicId,
+            pdf_provider: uploadResult.provider,
+            tamano_archivo: uploadResult.size,
+            numero_autorizacion: numeroAutorizacion,
+            fecha_autorizacion: fechaAutorizacion,
+            estado: 'GENERADO',
+          },
+        },
+        { upsert: true, new: true },
+      );
       console.log(`✅ PDF de nota de débito guardado: ${uploadResult.url}`);
     } catch (error) {
       console.error('❌ Error generating debit note PDF:', error);

@@ -67,6 +67,14 @@ jest.mock('../../src/models/DeliveryNotePDF', () => {
       savedPDFs.push(this);
     }
     save = jest.fn().mockResolvedValue(this);
+    // The success path upserts by claveAcceso rather than constructing a
+    // document (claveAcceso is unique, so regenerating would throw E11000),
+    // so record that payload into savedPDFs too — the assertions read it.
+    static findOneAndUpdate = jest.fn((filter: any, update: any) => {
+      const doc = { ...filter, ...update.$set };
+      savedPDFs.push(doc);
+      return Promise.resolve(doc);
+    });
   }
   return { __esModule: true, default: MockPDF };
 });
@@ -289,7 +297,9 @@ describe('DeliveryNoteService', () => {
 
       expect(firmarXMLMock).toHaveBeenCalledWith('<guiaRemision/>', '/tmp/cert.p12', 'test-cert-password', '06');
       expect(guia.sri_estado).toBe('RECIBIDA');
-      expect(generateDeliveryNotePDFMock).toHaveBeenCalled();
+      // No RIDE on recepción — it is generated once the SRI authorizes the
+      // comprobante. See the invoice service test for the reasoning.
+      expect(generateDeliveryNotePDFMock).not.toHaveBeenCalled();
       expect(enqueueAuthorizationCheck).toHaveBeenCalledWith('06', 'gr-1');
     });
 
@@ -375,6 +385,10 @@ describe('DeliveryNoteService', () => {
         secuencial: '000000001',
         fecha_emision: new Date(),
         sri_fecha_respuesta: new Date(),
+        // The RIDE is only produced for an AUTHORIZED comprobante, so the
+        // fixture has to carry the SRI's authorization data.
+        autorizacion_numero: 'clave',
+        fecha_autorizacion: new Date(),
       };
 
       await DeliveryNoteService.generarPDFGuiaRemision(guia, empresaMock, requestValido);

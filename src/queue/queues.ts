@@ -3,11 +3,24 @@ import { getRedisConnection } from './connection';
 import type { DocumentType } from '../utils/sequence.utils';
 
 export const AUTHORIZATION_QUEUE = 'sri-authorization';
+export const PDF_QUEUE = 'sri-pdf';
+export const EMAIL_QUEUE = 'sri-email';
 
 /** Payload of every authorization-check job. */
 export type AuthorizationJob = {
   documentType: DocumentType;
   documentId: string;
+};
+
+/** Payload of every RIDE-generation job. */
+export type PdfJob = {
+  documentType: DocumentType;
+  documentId: string;
+};
+
+/** Payload of every invoice-email job. */
+export type EmailJob = {
+  claveAcceso: string;
 };
 
 /**
@@ -67,6 +80,40 @@ export const enqueueAuthorizationCheck = async (
     ...AUTHORIZATION_JOB_OPTIONS,
     delay: delayMs,
     jobId: authorizationJobId(documentType, documentId),
+  });
+};
+
+/**
+ * Enqueued once the SRI has AUTHORIZED a comprobante — never before.
+ *
+ * The RIDE used to be generated on recepción, one step earlier, which meant
+ * it was stamped with a placeholder authorization date (the recepción
+ * timestamp) and could be produced for a comprobante the SRI went on to
+ * reject. Nothing regenerated it when the real authorization arrived.
+ */
+export const enqueuePdfGeneration = async (documentType: DocumentType, documentId: string): Promise<void> => {
+  await getQueue(PDF_QUEUE).add('generate', { documentType, documentId } satisfies PdfJob, {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 10_000 },
+    removeOnComplete: { age: 3_600, count: 1_000 },
+    removeOnFail: false,
+    jobId: `${documentType}-${documentId}`,
+  });
+};
+
+/**
+ * Sending is keyed on the clave de acceso because that is what identifies an
+ * InvoicePDF row. The worker is idempotent regardless — it skips a row whose
+ * email_estado is already ENVIADO — which matters because the reconciler can
+ * legitimately drive the same comprobante through this path more than once.
+ */
+export const enqueueInvoiceEmail = async (claveAcceso: string): Promise<void> => {
+  await getQueue(EMAIL_QUEUE).add('send', { claveAcceso } satisfies EmailJob, {
+    attempts: 5,
+    backoff: { type: 'exponential', delay: 30_000 },
+    removeOnComplete: { age: 3_600, count: 1_000 },
+    removeOnFail: false,
+    jobId: `email-${claveAcceso}`,
   });
 };
 
