@@ -1,0 +1,61 @@
+name: Promote to production
+
+# Manual, deliberate deploy gate: retags an image that CI already built and
+# pushed as `:latest` (see the `docker` job in ci.yml) to `:prod`, WITHOUT
+# rebuilding it. The VPS's `watchtower` service (see compose.prod.yml) polls
+# `:prod` and recreates the `api`/`worker` containers when its digest
+# changes — this workflow run is what production actually deploys on.
+#
+# Run it from a commit whose `:latest` already passed CI, after checking
+# that commit's SHA-tagged image is the one you want live (use `git log` /
+# the Actions run for `ci.yml` to find it). To roll back, promote a prior
+# commit's SHA tag by filling in `sha_tag` instead of leaving it blank.
+on:
+  workflow_dispatch:
+    inputs:
+      sha_tag:
+        description: >
+          Full commit SHA to promote (the `sha-<full-sha>` tag ci.yml pushed
+          for that commit). Leave blank to promote the current `:latest`.
+        required: false
+        default: ''
+
+jobs:
+  promote:
+    name: Retag :latest (or a given SHA) as :prod
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Compute lowercase image name
+        # Mirrors the same computation in ci.yml's `docker` job — must match
+        # exactly what that job published, or the retag targets a
+        # nonexistent repository.
+        id: image
+        run: echo "name=ghcr.io/$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Retag as :prod
+        env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          SHA_TAG: ${{ inputs.sha_tag }}
+        run: |
+          if [ -n "$SHA_TAG" ]; then
+            SOURCE="$IMAGE:sha-$SHA_TAG"
+          else
+            SOURCE="$IMAGE:latest"
+          fi
+          echo "Promoting $SOURCE -> $IMAGE:prod"
+          docker buildx imagetools create -t "$IMAGE:prod" "$SOURCE"
+          docker buildx imagetools inspect "$IMAGE:prod"

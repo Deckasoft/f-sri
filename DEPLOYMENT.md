@@ -87,12 +87,35 @@ operativo puntual para esta fase de containerización.
   > despliegue en producción** (la imagen la construye GitHub Actions en un
   > runner x86_64, y CI no necesita el flag) — es solo una trampa para
   > cualquiera que construya la imagen a mano en una Mac M1/M2/M3/M4.
-- **`compose.prod.yml`**: dos servicios —
+- **`compose.prod.yml`**: cinco servicios —
   - `api`: la imagen de arriba, sin publicar puertos al host directamente.
+  - `worker`: la misma imagen, corriendo `node dist/worker.js` — los 4
+    workers de BullMQ (autorización, PDF, email, reconciliador).
+  - `redis`: job store de BullMQ, sin volumen (todo es re-derivable desde
+    MongoDB vía el reconciliador).
   - `caddy`: termina TLS (HTTPS automático vía Let's Encrypt) y hace reverse
     proxy a `api:3000`. Publica 80/443.
+  - `watchtower`: vigila el tag `:prod` en GHCR y recrea `api`/`worker`
+    cuando cambia — ver sección 6, es la mitad "recibir" del flujo de
+    despliegue.
   - **No hay contenedor de Mongo.** La base de datos es MongoDB Atlas; el VPS
     se conecta a través de `MONGO_URI` en `.env.production` (ver sección 3).
+
+### 1.2 Por qué VPS y no Lambda/Fargate
+
+Se evaluó desplegar todo en AWS Lambda para bajar costos: **descartado**. El
+flujo de emisión responde al cliente HTTP y *después* firma/envía al SRI en
+segundo plano (`trackBackgroundWork` en cada `*.service.ts` de documentos),
+lo cual Lambda mata al congelar el entorno de ejecución apenas retorna la
+respuesta; los 4 workers de BullMQ son consumidores bloqueantes de Redis de
+larga duración (`src/queue/connection.ts`); y el reconciliador es un job
+repetible de BullMQ. Adaptar esto a Lambda es una reescritura (SQS,
+encolar-antes-de-responder, EventBridge) para ahorrar, en el mejor caso,
+unos pocos dólares al mes. ECS Fargate también se descartó, pero por costo:
+con pricing verificado de AWS (us-east-1, x86 — la imagen está fijada a
+amd64 por Chromium/Puppeteer), API + worker + Redis + ALB salen en
+~US$47-50/mes on-demand (~US$28-32 con Spot), 3-5x el presupuesto de VPS
+(~US$5-12/mes).
 - **`compose.yml`** (existente) sigue siendo solo para desarrollo local
   (mongo + mongo-express con credenciales de prueba). No usarlo en el VPS.
 - **`compose.local.yml`** levanta el stack completo en tu máquina —
@@ -160,6 +183,8 @@ así que en local se publica el puerto de la API directamente.
   permisos `PutObject`/`GetObject`/`DeleteObject` acotados a ese bucket.
 - Una API key de [Resend](https://resend.com) y un remitente verificado, si
   se quiere el envío de emails con la factura adjunta.
+- `mongodb-database-tools` (para `mongodump`) y el `aws` CLI instalados en el
+  VPS, si se va a correr `scripts/backup-mongo.sh` (ver sección 9).
 
 ## 3. Variables de entorno (`.env.production`)
 
@@ -245,7 +270,10 @@ que hagas una de estas dos cosas:
 
 - **Opción A — login con un PAT (recomendado para mantener el paquete privado):**
   crea un GitHub Personal Access Token (classic) con el scope `read:packages`
-  y, en el VPS:
+  y, en el VPS **como root** (el servicio `watchtower` monta
+  `/root/.docker/config.json` de solo lectura para reusar exactamente este
+  login — si en cambio haces login como un usuario no-root, ajusta esa ruta
+  en `compose.prod.yml`):
   ```bash
   echo "$GHCR_PAT" | docker login ghcr.io -u <tu-usuario-github> --password-stdin
   ```
@@ -256,6 +284,14 @@ que hagas una de estas dos cosas:
   el paquete público, `docker compose pull` funciona sin login. Más simple,
   pero expone la imagen (no contiene secretos — `.env.production` nunca se
   hornea en ella — pero sí expone el código fuente compilado).
+
+**Antes del primer `pull`: el tag `:prod` todavía no existe.** `api` y
+`worker` usan `ghcr.io/deckasoft/f-sri:prod` por defecto (ver sección 6), y
+ese tag solo se crea corriendo el workflow "Promote to production"
+(`.github/workflows/promote.yml`) desde GitHub Actions — CI únicamente
+publica `:latest` en cada push a `main`. Antes del primer despliegue, corre
+ese workflow una vez (déjalo promover el `:latest` actual) para que exista
+`:prod` antes de intentar el `pull` de abajo.
 
 ```bash
 # En el VPS, en el directorio donde viven compose.prod.yml, Caddyfile y
@@ -334,15 +370,35 @@ curl -H "X-API-Key: <una-api-key>" http://localhost:3000/api/v1/identification-t
 
 ## 6. Actualizar a una nueva versión
 
+Desplegar ya **no** requiere entrar por SSH al VPS. `api`/`worker` en
+`compose.prod.yml` usan el tag `ghcr.io/deckasoft/f-sri:prod`, y el servicio
+`watchtower` (mismo compose) sondea GHCR cada 5 minutos y recrea esos dos
+contenedores en cuanto el dígest de `:prod` cambia.
+
+**El despliegue es correr el workflow "Promote to production"**
+(`.github/workflows/promote.yml`) desde GitHub Actions (`workflow_dispatch`):
+retagea la imagen `:latest` que CI ya construyó (o un `sha_tag` específico
+si querés promover un commit puntual) a `:prod`, sin reconstruir nada. Ese
+retag ES el despliegue — no hay paso adicional.
+
+- **Rollback:** volvé a correr el mismo workflow, pero con el input
+  `sha_tag` apuntando al SHA completo de un commit anterior cuyo `:latest`
+  ya haya pasado CI (el tag es `sha-<sha completo>`, publicado por el job
+  `docker` de `ci.yml` — buscalo en el historial de runs de ese workflow o
+  con `git log`).
+- **Por qué un gate manual y no despliegue automático en cada merge a
+  `main`:** un merge a `main` solo actualiza `:latest`; production sigue en
+  el `:prod` anterior hasta que alguien decide deliberadamente promoverlo.
+  Este sistema emite comprobantes tributarios con validez legal — un mal
+  merge no debe llegar solo a producción.
+
+Fallback manual si Watchtower no está corriendo (o para forzar el pull sin
+esperar el intervalo de sondeo), por SSH en el VPS:
+
 ```bash
 docker compose -f compose.prod.yml pull
 docker compose -f compose.prod.yml up -d
 ```
-
-Esto descarga la imagen `:latest` más reciente publicada por CI y recrea el
-contenedor `api` (Caddy no necesita reiniciarse salvo que cambie el
-Caddyfile). El despliegue es manual/por SSH a propósito — ver
-`task-7-report.md` para la justificación de no automatizarlo vía Actions.
 
 ## 7. Notas operativas
 
@@ -385,3 +441,81 @@ despliegue (IP del VPS no allowlisteada todavía, ver sección 3):
 4. Si el healthcheck falla pero no hay error de Mongo en los logs, revisa
    `docker compose logs caddy` — puede ser un problema de DNS/TLS entre
    Caddy e Internet, no del contenedor `api` en sí.
+
+## 8. Hardening del VPS
+
+`scripts/harden-vps.sh` es un script idempotente (se puede correr más de una
+vez sin romper nada) que cubre lo mínimo para no tener que estar
+"cuidando" el servidor a mano:
+
+```bash
+sudo ./scripts/harden-vps.sh
+```
+
+Configura: actualizaciones de seguridad automáticas (`unattended-upgrades`,
+con reinicio automático a las 4am si el kernel lo requiere), firewall `ufw`
+(solo 22/80/443), `fail2ban` sobre sshd, SSH solo por clave (sin login de
+root por contraseña), un swapfile de 2GB (los `mem_limit` combinados de
+`api`+`worker`+`redis` rondan 1.8GB — el swap absorbe picos de Chromium sin
+que el OOM killer entre en juego), rotación de logs del daemon de Docker
+(`max-size: 10m, max-file: 3` — logs sin rotar es la causa más común de
+disco lleno), y un cron semanal de `docker system prune`. Correlo una vez
+después de aprovisionar el VPS, antes o después del primer despliegue
+(sección 4) — el orden no importa.
+
+## 9. Backups de MongoDB (y cómo restaurar)
+
+**Atlas M0 (el tier gratuito) no incluye backups automáticos.** El único
+backup de los datos de producción es el que arma este script — si falla en
+silencio, no hay backup, así que el script pinguea una URL de healthcheck
+(ver abajo) en cada corrida.
+
+```bash
+# En el VPS, cron diario (como el usuario que tiene el .env.production):
+crontab -e
+# agregar:
+0 3 * * * /ruta/a/f-sri/scripts/backup-mongo.sh >> /var/log/f-sri-backup.log 2>&1
+```
+
+El script (`scripts/backup-mongo.sh`) lee `MONGO_URI`/`S3_BUCKET` de
+`.env.production`, corre `mongodump --archive --gzip` contra Atlas, y sube
+el resultado a `s3://$S3_BUCKET/backups/mongo/YYYY-MM-DD.archive.gz` (mismo
+bucket que ya usás para los PDFs — separado por prefijo, no por bucket).
+Requiere `mongodb-database-tools` y el `aws` CLI instalados en el VPS (ver
+sección 2).
+
+**Alertar si el backup falla:** creá un check gratuito en
+[healthchecks.io](https://healthchecks.io) y seteá `BACKUP_PING_URL` en
+`.env.production` con la URL que te da (p. ej.
+`https://hc-ping.com/<uuid>`). El script pinguea esa URL al terminar OK, y
+`<url>/fail` si `mongodump` o el `aws s3 cp` fallan — configurá el check
+para que te avise por email si no recibe un ping "OK" dentro de, por
+ejemplo, 26 horas.
+
+**Configuración del bucket S3 (una vez):** habilitá versionado en el bucket
+y una regla de lifecycle que expire objetos bajo `backups/mongo/` después de
+~90 días, para no acumular backups indefinidamente.
+
+### Restaurar (probalo ANTES de necesitarlo de verdad)
+
+```bash
+# Bajar el backup del día que se necesite:
+aws s3 cp s3://$S3_BUCKET/backups/mongo/YYYY-MM-DD.archive.gz /tmp/restore.archive.gz
+
+# Restaurar contra un cluster de prueba (NUNCA directo contra producción
+# sin antes verificar que es el backup correcto):
+mongorestore --uri="<MONGO_URI de un cluster/DB de scratch>" \
+  --archive=/tmp/restore.archive.gz --gzip --drop
+```
+
+Hacé este drill una vez, contra un cluster Atlas descartable, y contá los
+documentos restaurados contra lo esperado — un backup que nunca se restauró
+no es un backup confirmado, es una esperanza.
+
+## 10. Monitoreo de uptime
+
+Configuración manual, una sola vez: dado de alta un check HTTPS gratuito en
+[UptimeRobot](https://uptimerobot.com) (o similar) apuntando a
+`https://tudominio.com/health`, con alerta por email si deja de responder
+200. Es la señal externa de que Caddy/DNS/TLS siguen funcionando, complementa
+(no reemplaza) el healthcheck interno de `docker compose ps`.

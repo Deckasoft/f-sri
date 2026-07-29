@@ -7,26 +7,36 @@
 # production default (see .env.example); nothing here should reintroduce a
 # `local`-storage volume.
 #
-# Usage on the VPS:
+# First-time setup on the VPS (or after changing the Caddyfile/env):
 #   docker compose -f compose.prod.yml pull
 #   docker compose -f compose.prod.yml up -d
 #
-# The image is built and pushed to GHCR by .github/workflows/ci.yml on every
-# push to main (see the `docker` job), which publishes to
+# After that, deploys do NOT touch the VPS: `api`/`worker` track the `:prod`
+# tag, and the `watchtower` service below polls GHCR and recreates them when
+# that tag's digest changes. To ship a new version, run the "Promote to
+# production" GitHub Action (.github/workflows/promote.yml), which retags
+# `:latest` -> `:prod` — that retag IS the deploy. `docker compose pull && up
+# -d` is still the fallback if Watchtower is down or you need to force it.
+#
+# The `:latest` tag is built and pushed to GHCR by .github/workflows/ci.yml on
+# every push to main (see the `docker` job), which publishes to
 # ghcr.io/<owner>/<repo> lowercased (GHCR/Docker registry paths must be all
 # lowercase; the workflow lowercases `github.repository` before using it).
 # For this repo (github.com/Deckasoft/f-sri) that's ghcr.io/deckasoft/f-sri —
 # the default below matches it. GHCR packages default to PRIVATE visibility:
 # see DEPLOYMENT.md section 4 for the two ways to make `docker compose pull`
-# succeed on the VPS (docker login ghcr.io with a PAT, or make the package
-# public).
+# (and Watchtower) succeed on the VPS (docker login ghcr.io with a PAT, or
+# make the package public) — Watchtower reads the same
+# ~/.docker/config.json the `docker login` writes, mounted read-only below.
 
 services:
   api:
-    image: ${GHCR_IMAGE:-ghcr.io/deckasoft/f-sri:latest}
+    image: ${GHCR_IMAGE:-ghcr.io/deckasoft/f-sri:prod}
     restart: always
     env_file:
       - .env.production
+    labels:
+      - 'com.centurylinklabs.watchtower.enable=true'
     expose:
       - '3000'
     # No `ports:` mapping — only Caddy is published on the host; the api
@@ -65,11 +75,13 @@ services:
   # inside the api, so a deploy or a crash silently dropped every comprobante
   # still awaiting authorization, with nothing to pick them up again.
   worker:
-    image: ${GHCR_IMAGE:-ghcr.io/deckasoft/f-sri:latest}
+    image: ${GHCR_IMAGE:-ghcr.io/deckasoft/f-sri:prod}
     restart: always
     command: ['node', 'dist/worker.js']
     env_file:
       - .env.production
+    labels:
+      - 'com.centurylinklabs.watchtower.enable=true'
     depends_on:
       redis:
         condition: service_healthy
@@ -111,6 +123,22 @@ services:
       - caddy_config:/config
     depends_on:
       - api
+
+  # Polls GHCR for a new digest on the `:prod` tag and recreates any
+  # container labeled watchtower.enable=true when it changes — `api` and
+  # `worker`, not `redis`/`caddy`. Deploying to production is retagging
+  # `:prod` in CI (see .github/workflows/promote.yml), not SSHing in; this
+  # is the other half, picking that retag up without a manual `pull && up`.
+  # `--cleanup` removes the superseded image afterwards so old layers don't
+  # slowly fill the VPS disk.
+  watchtower:
+    image: containrrr/watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /root/.docker/config.json:/config.json:ro
+    command: ['--interval', '300', '--cleanup', '--label-enable']
+    mem_limit: 128m
 
 volumes:
   caddy_data:
